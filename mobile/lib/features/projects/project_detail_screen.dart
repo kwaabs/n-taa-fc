@@ -40,7 +40,9 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
   int _downloadedBytes = 0;
   SeedResult? _seedResult;
   Timer? _pollTimer;
-  bool _includeReferenceData = true;
+  String? _statusMessage;
+  /// When true, use legacy single full bundle instead of core + layer packs.
+  bool _useLegacyFullBundle = false;
 
   @override
   void initState() {
@@ -98,32 +100,87 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
       _error = null;
       _downloadedBytes = 0;
       _seedResult = null;
+      _statusMessage = null;
     });
 
+    if (_useLegacyFullBundle) {
+      await _startLegacyDownload(repo);
+    } else {
+      await _startEfficientDownload(repo);
+    }
+  }
+
+  Future<void> _startEfficientDownload(BundleRepository repo) async {
+    try {
+      final downloader = ref.read(bundleDownloaderProvider);
+      final outcome = await downloader.downloadEfficient(
+        project: widget.project,
+        repo: repo,
+        onProgress: (p) {
+          if (!mounted) return;
+          setState(() {
+            _statusMessage = p.message;
+            _progress = p.jobProgress;
+            if (p.jobProgress != null) {
+              _stage = _BundleStage.polling;
+            } else if (p.message.toLowerCase().contains('download')) {
+              _stage = _BundleStage.downloading;
+            } else {
+              _stage = _BundleStage.requesting;
+            }
+          });
+        },
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _stage = _BundleStage.ready;
+        _ready = outcome.ready;
+        _seedResult = outcome.seedResult;
+        _downloadedBytes = outcome.downloadedBytes;
+        _statusMessage = null;
+      });
+      await _refresh();
+    } catch (e) {
+      debugPrint('[BUNDLE] efficient download error: $e');
+      if (!mounted) return;
+      setState(() {
+        _stage = _BundleStage.error;
+        _error = e.toString();
+        _statusMessage = null;
+      });
+    }
+  }
+
+  Future<void> _startLegacyDownload(BundleRepository repo) async {
     try {
       final result = await repo.request(
         projectId: widget.project.id,
-        includeReferenceData: _includeReferenceData,
+        includeReferenceData: true,
       );
 
-      debugPrint('[BUNDLE] request result: ready=${result.ready != null}, '
+      debugPrint('[BUNDLE] legacy request: ready=${result.ready != null}, '
           'jobId=${result.jobId}');
 
       if (result.ready != null) {
         setState(() {
           _stage = _BundleStage.downloading;
           _ready = result.ready;
+          _statusMessage = 'Downloading legacy bundle…';
         });
-        await _runDownload(result.ready!);
+        await _runLegacyDownload(result.ready!);
         return;
       }
 
       if (result.jobId != null) {
-        setState(() => _stage = _BundleStage.polling);
-        _startPolling(result.jobId!);
+        setState(() {
+          _stage = _BundleStage.polling;
+          _statusMessage = 'Building legacy bundle…';
+        });
+        _startLegacyPolling(result.jobId!);
       }
     } catch (e) {
-      debugPrint('[BUNDLE] request error: $e');
+      debugPrint('[BUNDLE] legacy request error: $e');
       setState(() {
         _stage = _BundleStage.error;
         _error = e.toString();
@@ -131,9 +188,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
     }
   }
 
-  void _startPolling(String jobId) {
-    debugPrint('[BUNDLE] Starting poll for job: $jobId');
-
+  void _startLegacyPolling(String jobId) {
     final repo = ref.read(bundleRepositoryProvider);
     if (repo == null) {
       setState(() {
@@ -151,9 +206,6 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
           jobId: jobId,
         );
 
-        debugPrint('[BUNDLE] poll status=${view.status} '
-            'percent=${view.progress?.percent}');
-
         if (!mounted) {
           timer.cancel();
           return;
@@ -166,8 +218,9 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
           setState(() {
             _stage = _BundleStage.downloading;
             _ready = view.ready;
+            _statusMessage = 'Downloading legacy bundle…';
           });
-          unawaited(_runDownload(view.ready!));
+          unawaited(_runLegacyDownload(view.ready!));
         } else if (view.status == 'failed') {
           timer.cancel();
           setState(() {
@@ -176,7 +229,6 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
           });
         }
       } catch (e) {
-        debugPrint('[BUNDLE] poll error: $e');
         timer.cancel();
         if (!mounted) return;
         setState(() {
@@ -187,7 +239,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
     });
   }
 
-  Future<void> _runDownload(BundleReady ready) async {
+  Future<void> _runLegacyDownload(BundleReady ready) async {
     try {
       final downloader = ref.read(bundleDownloaderProvider);
       await downloader.ensureProjectRow(widget.project);
@@ -206,9 +258,11 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
       setState(() {
         _stage = _BundleStage.ready;
         _seedResult = seedResult;
+        _statusMessage = null;
       });
+      await _refresh();
     } catch (e) {
-      debugPrint('[BUNDLE] download error: $e');
+      debugPrint('[BUNDLE] legacy download error: $e');
       if (!mounted) return;
       setState(() {
         _stage = _BundleStage.error;
@@ -226,6 +280,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
       _error = null;
       _downloadedBytes = 0;
       _seedResult = null;
+      _statusMessage = null;
     });
   }
 
@@ -385,7 +440,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Download the project as a single archive for offline use.',
+              'Downloads project setup first, then map reference data per layer.',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
@@ -394,26 +449,32 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
             if (_stage == _BundleStage.idle) ...[
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
-                title: const Text('Include reference data'),
+                title: const Text('Legacy full bundle'),
                 subtitle: const Text(
-                  'Larger download. Required for offline maps.',
+                  'Single archive with all layer reference data. Prefer off.',
                 ),
-                value: _includeReferenceData,
-                onChanged: (v) => setState(() => _includeReferenceData = v),
+                value: _useLegacyFullBundle,
+                onChanged: (v) => setState(() => _useLegacyFullBundle = v),
               ),
               const SizedBox(height: 8),
               FilledButton.icon(
                 onPressed: _startDownload,
                 icon: const Icon(Icons.cloud_download_outlined),
-                label: const Text('Download Bundle'),
+                label: const Text('Download for offline'),
               ),
             ],
             if (_stage == _BundleStage.requesting ||
                 _stage == _BundleStage.polling) ...[
-              _ProgressView(progress: _progress),
+              _ProgressView(
+                progress: _progress,
+                message: _statusMessage,
+              ),
             ],
             if (_stage == _BundleStage.downloading) ...[
-              _DownloadingView(filename: _ready?.filename ?? '...'),
+              _DownloadingView(
+                filename: _ready?.filename ?? '...',
+                message: _statusMessage,
+              ),
             ],
             if (_stage == _BundleStage.ready && _ready != null) ...[
               _ReadyView(
@@ -508,13 +569,14 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
 
 class _ProgressView extends StatelessWidget {
   final BundleProgress? progress;
-  const _ProgressView({required this.progress});
+  final String? message;
+  const _ProgressView({required this.progress, this.message});
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final percent = progress?.percent ?? 0;
-    final step = progress?.step ?? 'Preparing...';
+    final step = message ?? progress?.step ?? 'Preparing…';
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -541,7 +603,8 @@ class _ProgressView extends StatelessWidget {
 
 class _DownloadingView extends StatelessWidget {
   final String filename;
-  const _DownloadingView({required this.filename});
+  final String? message;
+  const _DownloadingView({required this.filename, this.message});
 
   @override
   Widget build(BuildContext context) {
@@ -561,7 +624,7 @@ class _DownloadingView extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text('Downloading bundle...',
+                  Text(message ?? 'Downloading…',
                       style: theme.textTheme.bodyMedium),
                   Text(
                     filename,

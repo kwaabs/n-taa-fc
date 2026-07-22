@@ -1,7 +1,7 @@
 import 'dart:convert';
-import 'dart:typed_data';
 
 import 'package:drift/drift.dart' show Value;
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 
@@ -32,6 +32,21 @@ class BundleDownloadResult {
       seedResult: seed,
     );
   }
+}
+
+/// Progress callbacks for the hybrid core + layer-ref download path.
+class EfficientDownloadProgress {
+  final String message;
+  final BundleProgress? jobProgress;
+  final int? layerIndex;
+  final int? layerTotal;
+
+  const EfficientDownloadProgress({
+    required this.message,
+    this.jobProgress,
+    this.layerIndex,
+    this.layerTotal,
+  });
 }
 
 class BundleDownloader {
@@ -99,6 +114,149 @@ class BundleDownloader {
       );
     }
     return seedResult;
+  }
+
+  /// Core pack first, then per-layer reference packs for the working set.
+  Future<({BundleReady ready, SeedResult? seedResult, int downloadedBytes})>
+      downloadEfficient({
+    required Project project,
+    required BundleRepository repo,
+    required void Function(EfficientDownloadProgress) onProgress,
+  }) async {
+    final projectId = project.id;
+    await ensureProjectRow(project);
+
+    onProgress(const EfficientDownloadProgress(message: 'Requesting core pack…'));
+    final coreReady = await _awaitReady(
+      request: () => repo.requestCore(projectId: projectId),
+      poll: (jobId) => repo.pollCoreJob(projectId: projectId, jobId: jobId),
+      onProgress: (p) => onProgress(EfficientDownloadProgress(
+        message: 'Building core pack…',
+        jobProgress: p,
+      )),
+    );
+
+    onProgress(EfficientDownloadProgress(
+      message: 'Downloading core pack…',
+      jobProgress: BundleProgress(step: 'download', percent: 0),
+    ));
+    final coreBytes = await downloadBundle(coreReady);
+    var totalBytes = coreBytes.bytes.length;
+
+    onProgress(const EfficientDownloadProgress(message: 'Seeding core pack…'));
+    var seed = await seedAndRecord(projectId: projectId, result: coreBytes);
+    seed ??= const SeedResult(
+      forms: 0,
+      layers: 0,
+      choiceLists: 0,
+      assignments: 0,
+      referenceFeatures: 0,
+    );
+
+    final seeder = _seeder;
+    if (seeder == null) {
+      return (
+        ready: coreReady,
+        seedResult: seed,
+        downloadedBytes: totalBytes,
+      );
+    }
+
+    final layerIds = await seeder.workingSetLayerIds(projectId);
+    debugPrint('[BUNDLE] working set layers=${layerIds.length}');
+
+    for (var i = 0; i < layerIds.length; i++) {
+      final layerId = layerIds[i];
+      final index = i + 1;
+      onProgress(EfficientDownloadProgress(
+        message: 'Requesting map data ($index/${layerIds.length})…',
+        layerIndex: index,
+        layerTotal: layerIds.length,
+      ));
+
+      try {
+        final layerReady = await _awaitReady(
+          request: () => repo.requestLayerRef(
+            projectId: projectId,
+            layerId: layerId,
+          ),
+          poll: (jobId) => repo.pollLayerRefJob(
+            projectId: projectId,
+            layerId: layerId,
+            jobId: jobId,
+          ),
+          onProgress: (p) => onProgress(EfficientDownloadProgress(
+            message: 'Building map data ($index/${layerIds.length})…',
+            jobProgress: p,
+            layerIndex: index,
+            layerTotal: layerIds.length,
+          )),
+        );
+
+        onProgress(EfficientDownloadProgress(
+          message: 'Downloading map data ($index/${layerIds.length})…',
+          layerIndex: index,
+          layerTotal: layerIds.length,
+        ));
+        final layerBytes = await downloadBundle(layerReady);
+        totalBytes += layerBytes.bytes.length;
+
+        onProgress(EfficientDownloadProgress(
+          message: 'Merging map data ($index/${layerIds.length})…',
+          layerIndex: index,
+          layerTotal: layerIds.length,
+        ));
+        final merged = await seeder.mergeReferencePack(
+          projectId: projectId,
+          layerId: layerId,
+          zipBytes: layerBytes.bytes,
+        );
+        seed = seed!.mergeRefs(
+          referenceFeatures: merged.referenceFeatures,
+          referenceTiles: merged.referenceTiles,
+          warnings: merged.warnings,
+        );
+      } catch (e) {
+        debugPrint('[BUNDLE] layer pack failed layer=$layerId: $e');
+        seed = seed!.mergeRefs(
+          referenceFeatures: 0,
+          referenceTiles: 0,
+          warnings: ['Layer $layerId reference pack failed: $e'],
+        );
+      }
+    }
+
+    return (
+      ready: coreReady,
+      seedResult: seed,
+      downloadedBytes: totalBytes,
+    );
+  }
+
+  Future<BundleReady> _awaitReady({
+    required Future<BundleRequestOutcome> Function() request,
+    required Future<BundleJobView> Function(String jobId) poll,
+    required void Function(BundleProgress?) onProgress,
+  }) async {
+    final outcome = await request();
+    if (outcome.ready != null) return outcome.ready!;
+
+    final jobId = outcome.jobId;
+    if (jobId == null || jobId.isEmpty) {
+      throw Exception('Pack request returned neither ready nor job_id');
+    }
+
+    while (true) {
+      await Future<void>.delayed(const Duration(seconds: 2));
+      final view = await poll(jobId);
+      onProgress(view.progress);
+      if (view.status == 'success' && view.ready != null) {
+        return view.ready!;
+      }
+      if (view.status == 'failed') {
+        throw Exception(view.error ?? 'Pack generation failed');
+      }
+    }
   }
 }
 

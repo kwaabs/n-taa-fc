@@ -44,48 +44,96 @@ class BundleReady {
   }
 }
 
+typedef BundleJobView = ({
+  BundleReady? ready,
+  BundleProgress? progress,
+  String status,
+  String? error,
+});
+
+typedef BundleRequestOutcome = ({BundleReady? ready, String? jobId});
+
 class BundleRepository {
   final Dio _dio;
   BundleRepository(this._dio);
 
-  /// Request a bundle. Either returns BundleReady immediately (cache hit)
-  /// OR returns a jobId we can poll.
-  Future<({BundleReady? ready, String? jobId})> request({
+  /// Legacy full (or slim) bundle.
+  Future<BundleRequestOutcome> request({
     required String projectId,
     required bool includeReferenceData,
-  }) async {
-    final response = await _dio.get(
+  }) {
+    return _requestPack(
       '/api/v1/projects/$projectId/bundle',
-      queryParameters: {'reference_data': includeReferenceData ? 'true' : 'false'},
+      queryParameters: {
+        'reference_data': includeReferenceData ? 'true' : 'false',
+      },
     );
+  }
+
+  Future<BundleJobView> pollJob({
+    required String projectId,
+    required String jobId,
+  }) {
+    return _pollPack('/api/v1/projects/$projectId/bundle/jobs/$jobId');
+  }
+
+  /// Slim core pack: catalog + forms/assignments, no reference geometry.
+  Future<BundleRequestOutcome> requestCore({required String projectId}) {
+    return _requestPack('/api/v1/projects/$projectId/core-pack');
+  }
+
+  Future<BundleJobView> pollCoreJob({
+    required String projectId,
+    required String jobId,
+  }) {
+    return _pollPack('/api/v1/projects/$projectId/core-pack/jobs/$jobId');
+  }
+
+  /// Per-layer reference GeoJSON (+ optional mbtiles).
+  Future<BundleRequestOutcome> requestLayerRef({
+    required String projectId,
+    required String layerId,
+  }) {
+    return _requestPack(
+      '/api/v1/projects/$projectId/layers/$layerId/reference-pack',
+    );
+  }
+
+  Future<BundleJobView> pollLayerRefJob({
+    required String projectId,
+    required String layerId,
+    required String jobId,
+  }) {
+    return _pollPack(
+      '/api/v1/projects/$projectId/layers/$layerId/reference-pack/jobs/$jobId',
+    );
+  }
+
+  Future<BundleRequestOutcome> _requestPack(
+    String path, {
+    Map<String, dynamic>? queryParameters,
+  }) async {
+    final response = await _dio.get(path, queryParameters: queryParameters);
 
     if (response.statusCode == 200) {
-      // Cache hit
       final data = unwrap<Map<String, dynamic>>(
         response.data,
         (d) => d as Map<String, dynamic>,
       );
       return (ready: BundleReady.fromJson(data), jobId: null);
     } else if (response.statusCode == 202) {
-      // Queued or running
       final data = unwrap<Map<String, dynamic>>(
         response.data,
         (d) => d as Map<String, dynamic>,
       );
       return (ready: null, jobId: data['job_id']?.toString());
     } else {
-      throw Exception('Bundle request failed (HTTP ${response.statusCode})');
+      throw Exception('Pack request failed (HTTP ${response.statusCode})');
     }
   }
 
-  Future<({BundleReady? ready, BundleProgress? progress, String status, String? error})>
-      pollJob({
-    required String projectId,
-    required String jobId,
-  }) async {
-    final response = await _dio.get(
-      '/api/v1/projects/$projectId/bundle/jobs/$jobId',
-    );
+  Future<BundleJobView> _pollPack(String path) async {
+    final response = await _dio.get(path);
     if (response.statusCode != 200) {
       throw Exception('Poll failed (HTTP ${response.statusCode})');
     }

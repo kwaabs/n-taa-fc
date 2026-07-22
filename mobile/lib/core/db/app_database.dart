@@ -84,6 +84,8 @@ class Assignments extends Table {
   TextColumn get id => text()();
   TextColumn get projectId =>
       text().references(Projects, #id, onDelete: KeyAction.cascade)();
+  /// Optional layer this assignment targets — drives reference-pack working set.
+  TextColumn get layerId => text().nullable()();
   TextColumn get title => text().nullable()();
   TextColumn get instructions => text().nullable()();
   TextColumn get priority => text().nullable()();
@@ -255,7 +257,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forUser(String userId) : super(_openConnection(userId));
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 7;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -300,6 +302,10 @@ class AppDatabase extends _$AppDatabase {
           // v5 → v6: project AOI GeoJSON for map boundary display
           if (from < 6) {
             await _safeAddColumn(m, projects, projects.areaOfInterest);
+          }
+          // v6 → v7: assignment layerId for reference-pack working set
+          if (from < 7) {
+            await _safeAddColumn(m, assignments, assignments.layerId);
           }
         },
       );

@@ -1830,6 +1830,12 @@ class $AssignmentsTable extends Assignments
       requiredDuringInsert: true,
       defaultConstraints: GeneratedColumn.constraintIsAlways(
           'REFERENCES projects (id) ON DELETE CASCADE'));
+  static const VerificationMeta _layerIdMeta =
+      const VerificationMeta('layerId');
+  @override
+  late final GeneratedColumn<String> layerId = GeneratedColumn<String>(
+      'layer_id', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
   static const VerificationMeta _titleMeta = const VerificationMeta('title');
   @override
   late final GeneratedColumn<String> title = GeneratedColumn<String>(
@@ -1883,6 +1889,7 @@ class $AssignmentsTable extends Assignments
   List<GeneratedColumn> get $columns => [
         id,
         projectId,
+        layerId,
         title,
         instructions,
         priority,
@@ -1912,6 +1919,10 @@ class $AssignmentsTable extends Assignments
           projectId.isAcceptableOrUnknown(data['project_id']!, _projectIdMeta));
     } else if (isInserting) {
       context.missing(_projectIdMeta);
+    }
+    if (data.containsKey('layer_id')) {
+      context.handle(_layerIdMeta,
+          layerId.isAcceptableOrUnknown(data['layer_id']!, _layerIdMeta));
     }
     if (data.containsKey('title')) {
       context.handle(
@@ -1964,6 +1975,8 @@ class $AssignmentsTable extends Assignments
           .read(DriftSqlType.string, data['${effectivePrefix}id'])!,
       projectId: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}project_id'])!,
+      layerId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}layer_id']),
       title: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}title']),
       instructions: attachedDatabase.typeMapping
@@ -1992,6 +2005,9 @@ class $AssignmentsTable extends Assignments
 class Assignment extends DataClass implements Insertable<Assignment> {
   final String id;
   final String projectId;
+
+  /// Optional layer this assignment targets — drives reference-pack working set.
+  final String? layerId;
   final String? title;
   final String? instructions;
   final String? priority;
@@ -2003,6 +2019,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
   const Assignment(
       {required this.id,
       required this.projectId,
+      this.layerId,
       this.title,
       this.instructions,
       this.priority,
@@ -2016,6 +2033,9 @@ class Assignment extends DataClass implements Insertable<Assignment> {
     final map = <String, Expression>{};
     map['id'] = Variable<String>(id);
     map['project_id'] = Variable<String>(projectId);
+    if (!nullToAbsent || layerId != null) {
+      map['layer_id'] = Variable<String>(layerId);
+    }
     if (!nullToAbsent || title != null) {
       map['title'] = Variable<String>(title);
     }
@@ -2043,6 +2063,9 @@ class Assignment extends DataClass implements Insertable<Assignment> {
     return AssignmentsCompanion(
       id: Value(id),
       projectId: Value(projectId),
+      layerId: layerId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(layerId),
       title:
           title == null && nullToAbsent ? const Value.absent() : Value(title),
       instructions: instructions == null && nullToAbsent
@@ -2069,6 +2092,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
     return Assignment(
       id: serializer.fromJson<String>(json['id']),
       projectId: serializer.fromJson<String>(json['projectId']),
+      layerId: serializer.fromJson<String?>(json['layerId']),
       title: serializer.fromJson<String?>(json['title']),
       instructions: serializer.fromJson<String?>(json['instructions']),
       priority: serializer.fromJson<String?>(json['priority']),
@@ -2085,6 +2109,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
     return <String, dynamic>{
       'id': serializer.toJson<String>(id),
       'projectId': serializer.toJson<String>(projectId),
+      'layerId': serializer.toJson<String?>(layerId),
       'title': serializer.toJson<String?>(title),
       'instructions': serializer.toJson<String?>(instructions),
       'priority': serializer.toJson<String?>(priority),
@@ -2099,6 +2124,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
   Assignment copyWith(
           {String? id,
           String? projectId,
+          Value<String?> layerId = const Value.absent(),
           Value<String?> title = const Value.absent(),
           Value<String?> instructions = const Value.absent(),
           Value<String?> priority = const Value.absent(),
@@ -2110,6 +2136,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
       Assignment(
         id: id ?? this.id,
         projectId: projectId ?? this.projectId,
+        layerId: layerId.present ? layerId.value : this.layerId,
         title: title.present ? title.value : this.title,
         instructions:
             instructions.present ? instructions.value : this.instructions,
@@ -2124,6 +2151,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
     return Assignment(
       id: data.id.present ? data.id.value : this.id,
       projectId: data.projectId.present ? data.projectId.value : this.projectId,
+      layerId: data.layerId.present ? data.layerId.value : this.layerId,
       title: data.title.present ? data.title.value : this.title,
       instructions: data.instructions.present
           ? data.instructions.value
@@ -2145,6 +2173,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
     return (StringBuffer('Assignment(')
           ..write('id: $id, ')
           ..write('projectId: $projectId, ')
+          ..write('layerId: $layerId, ')
           ..write('title: $title, ')
           ..write('instructions: $instructions, ')
           ..write('priority: $priority, ')
@@ -2158,14 +2187,15 @@ class Assignment extends DataClass implements Insertable<Assignment> {
   }
 
   @override
-  int get hashCode => Object.hash(id, projectId, title, instructions, priority,
-      dueDate, targetCount, status, area, downloadedAt);
+  int get hashCode => Object.hash(id, projectId, layerId, title, instructions,
+      priority, dueDate, targetCount, status, area, downloadedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is Assignment &&
           other.id == this.id &&
           other.projectId == this.projectId &&
+          other.layerId == this.layerId &&
           other.title == this.title &&
           other.instructions == this.instructions &&
           other.priority == this.priority &&
@@ -2179,6 +2209,7 @@ class Assignment extends DataClass implements Insertable<Assignment> {
 class AssignmentsCompanion extends UpdateCompanion<Assignment> {
   final Value<String> id;
   final Value<String> projectId;
+  final Value<String?> layerId;
   final Value<String?> title;
   final Value<String?> instructions;
   final Value<String?> priority;
@@ -2191,6 +2222,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
   const AssignmentsCompanion({
     this.id = const Value.absent(),
     this.projectId = const Value.absent(),
+    this.layerId = const Value.absent(),
     this.title = const Value.absent(),
     this.instructions = const Value.absent(),
     this.priority = const Value.absent(),
@@ -2204,6 +2236,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
   AssignmentsCompanion.insert({
     required String id,
     required String projectId,
+    this.layerId = const Value.absent(),
     this.title = const Value.absent(),
     this.instructions = const Value.absent(),
     this.priority = const Value.absent(),
@@ -2218,6 +2251,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
   static Insertable<Assignment> custom({
     Expression<String>? id,
     Expression<String>? projectId,
+    Expression<String>? layerId,
     Expression<String>? title,
     Expression<String>? instructions,
     Expression<String>? priority,
@@ -2231,6 +2265,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
     return RawValuesInsertable({
       if (id != null) 'id': id,
       if (projectId != null) 'project_id': projectId,
+      if (layerId != null) 'layer_id': layerId,
       if (title != null) 'title': title,
       if (instructions != null) 'instructions': instructions,
       if (priority != null) 'priority': priority,
@@ -2246,6 +2281,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
   AssignmentsCompanion copyWith(
       {Value<String>? id,
       Value<String>? projectId,
+      Value<String?>? layerId,
       Value<String?>? title,
       Value<String?>? instructions,
       Value<String?>? priority,
@@ -2258,6 +2294,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
     return AssignmentsCompanion(
       id: id ?? this.id,
       projectId: projectId ?? this.projectId,
+      layerId: layerId ?? this.layerId,
       title: title ?? this.title,
       instructions: instructions ?? this.instructions,
       priority: priority ?? this.priority,
@@ -2278,6 +2315,9 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
     }
     if (projectId.present) {
       map['project_id'] = Variable<String>(projectId.value);
+    }
+    if (layerId.present) {
+      map['layer_id'] = Variable<String>(layerId.value);
     }
     if (title.present) {
       map['title'] = Variable<String>(title.value);
@@ -2314,6 +2354,7 @@ class AssignmentsCompanion extends UpdateCompanion<Assignment> {
     return (StringBuffer('AssignmentsCompanion(')
           ..write('id: $id, ')
           ..write('projectId: $projectId, ')
+          ..write('layerId: $layerId, ')
           ..write('title: $title, ')
           ..write('instructions: $instructions, ')
           ..write('priority: $priority, ')
@@ -7321,6 +7362,7 @@ typedef $$AssignmentsTableCreateCompanionBuilder = AssignmentsCompanion
     Function({
   required String id,
   required String projectId,
+  Value<String?> layerId,
   Value<String?> title,
   Value<String?> instructions,
   Value<String?> priority,
@@ -7335,6 +7377,7 @@ typedef $$AssignmentsTableUpdateCompanionBuilder = AssignmentsCompanion
     Function({
   Value<String> id,
   Value<String> projectId,
+  Value<String?> layerId,
   Value<String?> title,
   Value<String?> instructions,
   Value<String?> priority,
@@ -7377,6 +7420,9 @@ class $$AssignmentsTableFilterComposer
   });
   ColumnFilters<String> get id => $composableBuilder(
       column: $table.id, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get layerId => $composableBuilder(
+      column: $table.layerId, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<String> get title => $composableBuilder(
       column: $table.title, builder: (column) => ColumnFilters(column));
@@ -7434,6 +7480,9 @@ class $$AssignmentsTableOrderingComposer
   });
   ColumnOrderings<String> get id => $composableBuilder(
       column: $table.id, builder: (column) => ColumnOrderings(column));
+
+  ColumnOrderings<String> get layerId => $composableBuilder(
+      column: $table.layerId, builder: (column) => ColumnOrderings(column));
 
   ColumnOrderings<String> get title => $composableBuilder(
       column: $table.title, builder: (column) => ColumnOrderings(column));
@@ -7493,6 +7542,9 @@ class $$AssignmentsTableAnnotationComposer
   });
   GeneratedColumn<String> get id =>
       $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get layerId =>
+      $composableBuilder(column: $table.layerId, builder: (column) => column);
 
   GeneratedColumn<String> get title =>
       $composableBuilder(column: $table.title, builder: (column) => column);
@@ -7564,6 +7616,7 @@ class $$AssignmentsTableTableManager extends RootTableManager<
           updateCompanionCallback: ({
             Value<String> id = const Value.absent(),
             Value<String> projectId = const Value.absent(),
+            Value<String?> layerId = const Value.absent(),
             Value<String?> title = const Value.absent(),
             Value<String?> instructions = const Value.absent(),
             Value<String?> priority = const Value.absent(),
@@ -7577,6 +7630,7 @@ class $$AssignmentsTableTableManager extends RootTableManager<
               AssignmentsCompanion(
             id: id,
             projectId: projectId,
+            layerId: layerId,
             title: title,
             instructions: instructions,
             priority: priority,
@@ -7590,6 +7644,7 @@ class $$AssignmentsTableTableManager extends RootTableManager<
           createCompanionCallback: ({
             required String id,
             required String projectId,
+            Value<String?> layerId = const Value.absent(),
             Value<String?> title = const Value.absent(),
             Value<String?> instructions = const Value.absent(),
             Value<String?> priority = const Value.absent(),
@@ -7603,6 +7658,7 @@ class $$AssignmentsTableTableManager extends RootTableManager<
               AssignmentsCompanion.insert(
             id: id,
             projectId: projectId,
+            layerId: layerId,
             title: title,
             instructions: instructions,
             priority: priority,
