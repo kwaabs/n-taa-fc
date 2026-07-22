@@ -143,6 +143,7 @@ func main() {
 		cacheClient,
 		bundleCacheRepo,
 		importJobRepo,
+		layerRepo,
 		accessService,
 		bundleHashSvc,
 	)
@@ -339,6 +340,8 @@ func main() {
 					r.Get("/", bundleHandler.RequestCore)
 					r.Get("/jobs/{jobID}", bundleHandler.GetJob)
 				})
+				r.With(middleware.RequireRole(accessService, "admin")).
+					Post("/packs/warm", bundleHandler.WarmPacks)
 
 				// Reconciliation
 				// Reconciliation — supervisor+ only (writes to source DB)

@@ -23,6 +23,7 @@ type BundleService struct {
 	cache           cache.Cache
 	bundleCacheRepo *repository.BundleCacheRepo
 	importJobRepo   *repository.ImportJobRepo
+	layerRepo       *repository.LayerRepo
 	accessSvc       *AccessService
 	hashSvc         *BundleHashService
 	pool            *BundleWorkerPool
@@ -34,6 +35,7 @@ func NewBundleService(
 	cacheClient cache.Cache,
 	bundleCacheRepo *repository.BundleCacheRepo,
 	importJobRepo *repository.ImportJobRepo,
+	layerRepo *repository.LayerRepo,
 	accessSvc *AccessService,
 	hashSvc *BundleHashService,
 ) (*BundleService, error) {
@@ -53,6 +55,7 @@ func NewBundleService(
 		cache:           cacheClient,
 		bundleCacheRepo: bundleCacheRepo,
 		importJobRepo:   importJobRepo,
+		layerRepo:       layerRepo,
 		accessSvc:       accessSvc,
 		hashSvc:         hashSvc,
 		s3client:        client,
@@ -254,6 +257,75 @@ func (s *BundleService) RequestLayerReferencePack(
 		ContentHash: contentHash,
 		JobID:       &jobID,
 	}, nil
+}
+
+// WarmResult is the response for pre-peak pack warming.
+type WarmResult struct {
+	Core   *BundleRequestResult `json:"core"`
+	Layers []WarmLayerResult    `json:"layers"`
+}
+
+type WarmLayerResult struct {
+	LayerID uuid.UUID            `json:"layer_id"`
+	Result  *BundleRequestResult `json:"result,omitempty"`
+	Error   string               `json:"error,omitempty"`
+}
+
+// WarmProjectPacks enqueues/builds the slim core pack for the caller plus
+// reference packs for the given layers (or all published layers when empty).
+// Layer packs share Valkey hot keys across users — the main pre-peak win.
+func (s *BundleService) WarmProjectPacks(
+	ctx context.Context,
+	projectID, userID uuid.UUID,
+	layerIDs []uuid.UUID,
+) (*WarmResult, error) {
+	ok, err := s.accessSvc.CanAccess(ctx, userID, projectID)
+	if err != nil || !ok {
+		return nil, fmt.Errorf("access denied: not a project member")
+	}
+
+	out := &WarmResult{}
+
+	core, err := s.RequestBundle(ctx, projectID, userID, false)
+	if err != nil {
+		return nil, fmt.Errorf("warm core: %w", err)
+	}
+	out.Core = core
+
+	ids := layerIDs
+	if len(ids) == 0 {
+		if s.layerRepo == nil {
+			return out, nil
+		}
+		layers, listErr := s.layerRepo.ListByProject(ctx, projectID)
+		if listErr != nil {
+			return nil, fmt.Errorf("list layers: %w", listErr)
+		}
+		for _, layer := range layers {
+			if layer.Status == "published" || layer.PublishedAt != nil {
+				ids = append(ids, layer.ID)
+			}
+		}
+		// If nothing marked published, warm all layers in catalog.
+		if len(ids) == 0 {
+			for _, layer := range layers {
+				ids = append(ids, layer.ID)
+			}
+		}
+	}
+
+	for _, layerID := range ids {
+		res, layerErr := s.RequestLayerReferencePack(ctx, projectID, layerID, userID)
+		entry := WarmLayerResult{LayerID: layerID}
+		if layerErr != nil {
+			entry.Error = layerErr.Error()
+		} else {
+			entry.Result = res
+		}
+		out.Layers = append(out.Layers, entry)
+	}
+
+	return out, nil
 }
 
 // ── Job status polling ────────────────────────────────

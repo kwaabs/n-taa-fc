@@ -115,10 +115,18 @@ setup: env-files
 	$(PWSH) "$(COMPOSE_PS1)" -ComposeFile "$(INFRA_DIR)/docker-compose.yml" -ProjectDir "$(INFRA_DIR)" -EnvFile "$(COMPOSE_ENV)" -Args "restart martin"
 	@echo Setup complete.
 
-.PHONY: fc-api geo-api fc-web geo-web mobile-run adb-reverse adb-reverse-status adb-reverse-clear tidy-fc tidy-geo
+.PHONY: fc-api geo-api fc-web geo-web mobile-run adb-reverse adb-reverse-status adb-reverse-clear tidy-fc tidy-geo fc-api-up fc-api-down
 
 fc-api:
 	cd /d "$(subst /,\,$(FC_API))" && go run ./cmd/server/main.go
+
+# Containerized fc-api replicas behind Caddy on :5355 (stop local `make fc-api` first).
+fc-api-up:
+	docker compose -f "$(INFRA_DIR)/docker-compose.yml" -f "$(INFRA_DIR)/docker-compose.fc-api.yml" --env-file "$(COMPOSE_ENV)" up -d --build --scale fc-api=2
+
+fc-api-down:
+	docker compose -f "$(INFRA_DIR)/docker-compose.yml" -f "$(INFRA_DIR)/docker-compose.fc-api.yml" --env-file "$(COMPOSE_ENV)" stop fc-api fc-api-lb
+	docker compose -f "$(INFRA_DIR)/docker-compose.yml" -f "$(INFRA_DIR)/docker-compose.fc-api.yml" --env-file "$(COMPOSE_ENV)" rm -f fc-api fc-api-lb
 
 geo-api:
 	cd /d "$(subst /,\,$(GEO_API))" && go run ./cmd/server/main.go

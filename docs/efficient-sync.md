@@ -58,8 +58,30 @@ Legacy full bundle remains behind an optional toggle.
 - Auth profile upsert debounced via Valkey (`AUTH_PROFILE_UPSERT_TTL`, default 5m)
 - Mobile sync: exponential backoff on retryable push batches (up to 3 attempts) and attachment uploads
 
-## Capacity (later phases)
+## Capacity (runtime)
 
-- fc-api replicas behind OSS LB (JWT, no sticky sessions)
-- Warm core + hot layer packs before peak
+### fc-api replicas + LB (landed)
+
+```bash
+# Stop local `make fc-api` first (port 5355).
+make fc-api-up    # builds image, scales 2 replicas behind Caddy :5355
+make fc-api-down  # stops LB + API containers only
+```
+
+Overlay: `infra/docker-compose.fc-api.yml` + `infra/caddy/Caddyfile` (round-robin, `/health` checks, no sticky sessions).
+
+### Warm packs (landed)
+
+```http
+POST /api/v1/projects/{projectID}/packs/warm
+Authorization: Bearer <admin JWT>
+Content-Type: application/json
+
+{ "layer_ids": [] }   # optional; empty → published (else all) layers
+```
+
+Enqueues slim core (caller-scoped) + per-layer reference packs. Layer packs share Valkey hot keys across devices — use before peak shift.
+
+## Capacity (later)
+
 - Incremental manifests + CDN for pack bytes

@@ -1,0 +1,12 @@
+# LB for fc-api replicas. JWT auth — no sticky sessions.
+:5355 {
+	encode gzip
+	reverse_proxy fc-api:5355 {
+		lb_policy round_robin
+		health_uri /health
+		health_interval 5s
+		health_timeout 2s
+		health_status 2xx
+		fail_duration 10s
+	}
+}
