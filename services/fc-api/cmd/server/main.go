@@ -400,6 +400,8 @@ func main() {
 					r.Route("/{layerID}", func(r chi.Router) {
 						r.Get("/", layerHandler.Get)
 						r.Get("/rows", layerHandler.ListRows)
+						r.Get("/reference-pack", bundleHandler.RequestLayerReferencePack)
+						r.Get("/reference-pack/jobs/{jobID}", bundleHandler.GetJob)
 						r.With(middleware.RequireRole(accessService, "supervisor")).
 							Put("/", layerHandler.Update)
 						r.With(middleware.RequireRole(accessService, "supervisor")).

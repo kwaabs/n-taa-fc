@@ -25,11 +25,14 @@ GET /api/v1/projects/{projectID}/core-pack/jobs/{jobID}
 
 Equivalent to `GET .../bundle?reference_data=false` (layers catalog kept; no `reference_features` / `reference_tiles`).
 
-### Reference pack API (next)
+### Reference pack API (landed)
 
 ```http
 GET /api/v1/projects/{projectID}/layers/{layerID}/reference-pack
+GET /api/v1/projects/{projectID}/layers/{layerID}/reference-pack/jobs/{jobID}
 ```
+
+ZIP contains `reference_features/{layerId}.geojson`, optional `reference_tiles/{layerId}.mbtiles`, and `manifest.json`.
 
 Working-set rule (product): auto-include layers on assignments + layers marked required offline; catalog may list all project layers.
 

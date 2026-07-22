@@ -71,8 +71,35 @@ func (h *BundleHandler) RequestCore(w http.ResponseWriter, r *http.Request) {
     RespondJSON(w, status, result)
 }
 
+// RequestLayerReferencePack returns one layer's reference GeoJSON (+ mbtiles).
+//
+// GET /api/v1/projects/{projectID}/layers/{layerID}/reference-pack
+func (h *BundleHandler) RequestLayerReferencePack(w http.ResponseWriter, r *http.Request) {
+    projectID, err := uuid.Parse(chi.URLParam(r, "projectID"))
+    if err != nil {
+        RespondError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+        return
+    }
+    layerID, err := uuid.Parse(chi.URLParam(r, "layerID"))
+    if err != nil {
+        RespondError(w, http.StatusBadRequest, "INVALID_ID", "invalid layer ID")
+        return
+    }
+    userID := middleware.GetUserID(r.Context())
+    result, err := h.svc.RequestLayerReferencePack(r.Context(), projectID, layerID, userID)
+    if err != nil {
+        RespondError(w, http.StatusBadRequest, "LAYER_PACK_REQUEST_FAILED", err.Error())
+        return
+    }
+    status := http.StatusOK
+    if result.Status != "ready" {
+        status = http.StatusAccepted
+    }
+    RespondJSON(w, status, result)
+}
+
 // GET /api/v1/projects/{projectID}/bundle/jobs/{jobID}
-// Also used to poll core-pack jobs (same job store).
+// Also used to poll core-pack and layer reference-pack jobs (same job store).
 func (h *BundleHandler) GetJob(w http.ResponseWriter, r *http.Request) {
     jobID, err := uuid.Parse(chi.URLParam(r, "jobID"))
     if err != nil {

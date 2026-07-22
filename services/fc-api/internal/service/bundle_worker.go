@@ -138,8 +138,10 @@ func (p *BundleWorkerPool) worker(id int) {
 // ── runJob — main generation flow ──────────────────────
 
 type bundleJobConfigInner struct {
-	IncludeReferenceData bool   `json:"include_reference_data"`
-	ContentHash          string `json:"content_hash"`
+	IncludeReferenceData bool      `json:"include_reference_data"`
+	ContentHash          string    `json:"content_hash"`
+	PackKind             string    `json:"pack_kind,omitempty"`
+	LayerID              uuid.UUID `json:"layer_id,omitempty"`
 }
 
 func (p *BundleWorkerPool) runJob(job *model.ImportJob) {
@@ -151,6 +153,11 @@ func (p *BundleWorkerPool) runJob(job *model.ImportJob) {
 	var cfg bundleJobConfigInner
 	if err := json.Unmarshal(job.Config, &cfg); err != nil {
 		p.finishFailed(ctx, job, "bad config: "+err.Error())
+		return
+	}
+
+	if cfg.PackKind == "layer_ref" || job.JobType == "layer_reference_pack" {
+		p.runLayerRefJob(job, cfg)
 		return
 	}
 
@@ -305,6 +312,141 @@ func (p *BundleWorkerPool) runJob(job *model.ImportJob) {
 		"forms", manifest.Counts.Forms,
 		"layers", manifest.Counts.Layers,
 		"ref_features", manifest.Counts.ReferenceFeatures,
+	)
+}
+
+// runLayerRefJob builds a ZIP with one layer's reference GeoJSON (+ optional mbtiles).
+func (p *BundleWorkerPool) runLayerRefJob(job *model.ImportJob, cfg bundleJobConfigInner) {
+	ctx := p.ctx
+
+	if cfg.LayerID == uuid.Nil {
+		p.finishFailed(ctx, job, "layer_id required")
+		return
+	}
+
+	project, err := p.projectRepo.FindByID(ctx, job.ProjectID)
+	if err != nil {
+		p.finishFailed(ctx, job, "project not found")
+		return
+	}
+
+	layer, err := p.layerRepo.FindByID(ctx, cfg.LayerID)
+	if err != nil || layer == nil {
+		p.finishFailed(ctx, job, "layer not found")
+		return
+	}
+	if layer.ProjectID != job.ProjectID {
+		p.finishFailed(ctx, job, "layer does not belong to project")
+		return
+	}
+	if layer.Status != "published" {
+		p.finishFailed(ctx, job, "layer must be published")
+		return
+	}
+
+	hasAOI := len(project.AreaOfInterest) > 0
+	warnings := []string{}
+	if !hasAOI {
+		warnings = append(warnings,
+			"Project has no AOI; reference features included without spatial filter")
+	}
+
+	manifest := map[string]interface{}{
+		"pack_kind":              "layer_ref",
+		"bundle_version":         "1.0",
+		"project_id":             project.ID,
+		"layer_id":               layer.ID,
+		"layer_name":             layer.Name,
+		"generated_at":           time.Now(),
+		"generated_by":           job.CreatedBy,
+		"include_reference_data": true,
+		"has_aoi":                hasAOI,
+		"content_hash":           cfg.ContentHash,
+		"warnings":               warnings,
+	}
+
+	var buf bytes.Buffer
+	hasher := sha256.New()
+	mw := io.MultiWriter(&buf, hasher)
+	zw := zip.NewWriter(mw)
+
+	p.progress(ctx, job.ID, "reference_features", 20)
+	refCount, err := p.writeOneLayerReference(
+		ctx, zw, *layer, project.AreaOfInterest, hasAOI, project.AOIBufferMeters(),
+	)
+	if err != nil {
+		p.finishFailed(ctx, job, "write reference: "+err.Error())
+		return
+	}
+
+	counts := model.BundleCounts{
+		Layers:            1,
+		ReferenceFeatures: refCount,
+	}
+	manifest["counts"] = counts
+
+	p.progress(ctx, job.ID, "manifest", 90)
+	manifest["bundle_hash"] = hex.EncodeToString(hasher.Sum(nil))[:16]
+	if err := writeJSON(zw, "manifest.json", manifest); err != nil {
+		p.finishFailed(ctx, job, "write manifest: "+err.Error())
+		return
+	}
+	if err := zw.Close(); err != nil {
+		p.finishFailed(ctx, job, "close zip: "+err.Error())
+		return
+	}
+
+	p.progress(ctx, job.ID, "uploading", 97)
+	storageKey := fmt.Sprintf(
+		"layer-packs/%s/%s/%s.zip", job.ProjectID, layer.ID, cfg.ContentHash,
+	)
+	filename := fmt.Sprintf("layer_%s_%s.zip", sanitizeFilename(layer.Name), cfg.ContentHash[:8])
+
+	reader := bytes.NewReader(buf.Bytes())
+	_, err = p.s3client.PutObject(ctx, p.s3bucket, storageKey, reader, int64(buf.Len()),
+		minio.PutObjectOptions{ContentType: "application/zip"})
+	if err != nil {
+		p.finishFailed(ctx, job, "s3 upload: "+err.Error())
+		return
+	}
+
+	countsJSON, _ := json.Marshal(counts)
+	warningsJSON, _ := json.Marshal(warnings)
+	cacheEntry := &model.BundleCache{
+		ProjectID:            job.ProjectID,
+		UserID:               job.CreatedBy,
+		IncludeReferenceData: true,
+		ContentHash:          cfg.ContentHash,
+		StorageKey:           storageKey,
+		Filename:             filename,
+		SizeBytes:            int64(buf.Len()),
+		Counts:               countsJSON,
+		Warnings:             warningsJSON,
+	}
+	if err := p.bundleCacheRepo.Create(ctx, cacheEntry); err != nil {
+		slog.Warn("failed to write layer pack cache row", "error", err, "job_id", job.ID)
+	}
+
+	result := model.BundleJobResult{
+		CacheID:     cacheEntry.ID,
+		ContentHash: cfg.ContentHash,
+		StorageKey:  storageKey,
+		Filename:    filename,
+		SizeBytes:   int64(buf.Len()),
+		Counts:      counts,
+		Warnings:    warnings,
+	}
+	resultJSON, _ := json.Marshal(result)
+	_ = p.importJobRepo.MarkFinished(ctx, job.ID, "success", resultJSON, "")
+	p.publishStatus(ctx, job.ID, "success", &model.BundleJobProgress{Step: "complete", Percent: 100})
+	p.bundleSvc.ReleaseJobDedupLock(ctx, job)
+	p.bundleSvc.warmLayerHotCache(ctx, job.ProjectID, layer.ID, cacheEntry)
+
+	slog.Info("layer reference pack generated",
+		"job_id", job.ID,
+		"layer_id", layer.ID,
+		"size_bytes", buf.Len(),
+		"ref_features", refCount,
 	)
 }
 
@@ -493,55 +635,64 @@ func (p *BundleWorkerPool) writeReferenceFeatures(
 	perLayer := 50.0 / float64(max(len(layers), 1))
 
 	for _, l := range layers {
-		var (
-			features []map[string]interface{}
-			err      error
-		)
-		if l.SourceType == "linked_table" {
-			features, err = p.queryLinkedReferenceFeatures(ctx, l, aoi, hasAOI, bufferMeters)
-		} else {
-			features, err = p.queryCopiedReferenceFeatures(ctx, l, aoi, hasAOI, bufferMeters)
-		}
+		n, err := p.writeOneLayerReference(ctx, zw, l, aoi, hasAOI, bufferMeters)
 		if err != nil {
-			return total, fmt.Errorf("query layer %s (%s): %w", l.Name, l.ID, err)
-		}
-
-		geojson := map[string]interface{}{
-			"type":     "FeatureCollection",
-			"features": features,
-		}
-		if err := writeJSON(zw, fmt.Sprintf("reference_features/%s.geojson", l.ID), geojson); err != nil {
 			return total, err
 		}
-
-		// Also generate .mbtiles for offline mobile rendering.
-		// Non-fatal: bundle can still serve GeoJSON if tile gen fails.
-		if p.tippecanoeClient != nil && len(features) > 0 {
-			geomType := mapGeometryTypeToTippecanoe(l.GeometryType)
-			params := DefaultTileParams("reference_features", geomType)
-			mbtiles, tileErr := p.tippecanoeClient.GenerateTiles(features, params)
-			if tileErr != nil {
-				slog.Warn("tile generation failed; bundle will use GeoJSON only",
-					"layer_id", l.ID, "error", tileErr)
-			} else {
-				if err := writeBytes(zw, fmt.Sprintf("reference_tiles/%s.mbtiles", l.ID), mbtiles); err != nil {
-					return total, err
-				}
-				slog.Info("bundle: emitted mbtiles",
-					"layer_id", l.ID,
-					"layer_name", l.Name,
-					"source_type", l.SourceType,
-					"features", len(features),
-					"mbtiles_kb", len(mbtiles)/1024,
-				)
-			}
-		}
-
-		total += len(features)
+		total += n
 		step += perLayer
 		p.progress(ctx, jobID, fmt.Sprintf("ref_features_%s", l.ID), int(step))
 	}
 	return total, nil
+}
+
+func (p *BundleWorkerPool) writeOneLayerReference(
+	ctx context.Context, zw *zip.Writer, l model.Layer,
+	aoi json.RawMessage, hasAOI bool, bufferMeters int,
+) (int, error) {
+	var (
+		features []map[string]interface{}
+		err      error
+	)
+	if l.SourceType == "linked_table" {
+		features, err = p.queryLinkedReferenceFeatures(ctx, l, aoi, hasAOI, bufferMeters)
+	} else {
+		features, err = p.queryCopiedReferenceFeatures(ctx, l, aoi, hasAOI, bufferMeters)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("query layer %s (%s): %w", l.Name, l.ID, err)
+	}
+
+	geojson := map[string]interface{}{
+		"type":     "FeatureCollection",
+		"features": features,
+	}
+	if err := writeJSON(zw, fmt.Sprintf("reference_features/%s.geojson", l.ID), geojson); err != nil {
+		return 0, err
+	}
+
+	if p.tippecanoeClient != nil && len(features) > 0 {
+		geomType := mapGeometryTypeToTippecanoe(l.GeometryType)
+		params := DefaultTileParams("reference_features", geomType)
+		mbtiles, tileErr := p.tippecanoeClient.GenerateTiles(features, params)
+		if tileErr != nil {
+			slog.Warn("tile generation failed; pack will use GeoJSON only",
+				"layer_id", l.ID, "error", tileErr)
+		} else {
+			if err := writeBytes(zw, fmt.Sprintf("reference_tiles/%s.mbtiles", l.ID), mbtiles); err != nil {
+				return 0, err
+			}
+			slog.Info("emitted mbtiles",
+				"layer_id", l.ID,
+				"layer_name", l.Name,
+				"source_type", l.SourceType,
+				"features", len(features),
+				"mbtiles_kb", len(mbtiles)/1024,
+			)
+		}
+	}
+
+	return len(features), nil
 }
 
 func (p *BundleWorkerPool) queryCopiedReferenceFeatures(
@@ -812,16 +963,7 @@ func writeJSON(zw *zip.Writer, name string, v interface{}) error {
 }
 
 func buildBundleFilename(projectName, contentHash string) string {
-	safe := strings.Map(func(r rune) rune {
-		switch {
-		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
-			return r
-		case r == ' ', r == '-', r == '_':
-			return '_'
-		default:
-			return -1
-		}
-	}, projectName)
+	safe := sanitizeFilename(projectName)
 	if safe == "" {
 		safe = "project"
 	}
@@ -834,6 +976,19 @@ func buildBundleFilename(projectName, contentHash string) string {
 		short = short[:8]
 	}
 	return fmt.Sprintf("%s_bundle_%s_%s.zip", safe, date, short)
+}
+
+func sanitizeFilename(name string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			return r
+		case r == ' ', r == '-', r == '_':
+			return '_'
+		default:
+			return -1
+		}
+	}, name)
 }
 
 func max(a, b int) int {

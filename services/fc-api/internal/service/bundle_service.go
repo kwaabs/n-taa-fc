@@ -182,6 +182,80 @@ func (s *BundleService) RequestBundle(
 	}, nil
 }
 
+// RequestLayerReferencePack builds or returns a cached ZIP with one layer's
+// reference GeoJSON (+ optional mbtiles). Used by efficient-sync hybrid.
+func (s *BundleService) RequestLayerReferencePack(
+	ctx context.Context,
+	projectID, layerID, userID uuid.UUID,
+) (*BundleRequestResult, error) {
+	ok, err := s.accessSvc.CanAccess(ctx, userID, projectID)
+	if err != nil || !ok {
+		return nil, fmt.Errorf("access denied: not a project member")
+	}
+
+	var projectStatus string
+	if err := s.bundleCacheRepo.GetProjectStatus(ctx, projectID, &projectStatus); err != nil {
+		return nil, fmt.Errorf("project not found")
+	}
+	if projectStatus != "active" {
+		return nil, fmt.Errorf("project must be dispatched before packs can be downloaded (current status: %s)", projectStatus)
+	}
+
+	if hot := s.checkLayerHotCache(ctx, projectID, layerID); hot != nil {
+		return hot, nil
+	}
+
+	contentHash, err := s.hashSvc.ComputeLayerRef(ctx, projectID, layerID)
+	if err != nil {
+		return nil, fmt.Errorf("compute layer hash: %w", err)
+	}
+
+	// Layer packs are project-scoped content; still keyed by requesting user in
+	// bundle_cache (FK). Hash uniqueness prevents collision with full bundles.
+	entry, err := s.bundleCacheRepo.FindMatch(ctx, projectID, userID, true, contentHash)
+	if err == nil && entry != nil && entry.ID != uuid.Nil {
+		return s.serveLayerFromCache(ctx, projectID, layerID, entry)
+	}
+
+	existingJobID := s.findOrLockActiveJob(ctx, projectID, userID, true, contentHash)
+	if existingJobID != nil {
+		status := s.readJobStatus(ctx, *existingJobID)
+		if status == "pending" || status == "queued" || status == "running" {
+			return &BundleRequestResult{
+				Status:      status,
+				ContentHash: contentHash,
+				JobID:       existingJobID,
+			}, nil
+		}
+		s.releaseDedupLock(ctx, projectID, userID, true, contentHash)
+		if again := s.findOrLockActiveJob(ctx, projectID, userID, true, contentHash); again != nil {
+			status = s.readJobStatus(ctx, *again)
+			if status == "pending" || status == "queued" || status == "running" {
+				return &BundleRequestResult{
+					Status:      status,
+					ContentHash: contentHash,
+					JobID:       again,
+				}, nil
+			}
+			s.releaseDedupLock(ctx, projectID, userID, true, contentHash)
+			_ = s.findOrLockActiveJob(ctx, projectID, userID, true, contentHash)
+		}
+	}
+
+	jobID, err := s.enqueueLayerRefJob(ctx, projectID, userID, layerID, contentHash)
+	if err != nil {
+		s.releaseDedupLock(ctx, projectID, userID, true, contentHash)
+		return nil, fmt.Errorf("enqueue layer pack: %w", err)
+	}
+	s.storeJobUnderLock(ctx, projectID, userID, true, contentHash, jobID)
+
+	return &BundleRequestResult{
+		Status:      "queued",
+		ContentHash: contentHash,
+		JobID:       &jobID,
+	}, nil
+}
+
 // ── Job status polling ────────────────────────────────
 
 type BundleJobView struct {
@@ -255,9 +329,16 @@ func (s *BundleService) buildResultFromJob(ctx context.Context, jobID uuid.UUID)
 	// Try to find the cache entry (and refresh accessed time)
 	entry, err := s.bundleCacheRepo.FindMatch(ctx, job.ProjectID, job.CreatedBy, cfg.IncludeReferenceData, r.ContentHash)
 	if err == nil && entry != nil && entry.ID != uuid.Nil {
-		ready, err := s.serveFromCache(ctx, entry)
-		if err == nil {
-			return ready
+		if cfg.PackKind == "layer_ref" && cfg.LayerID != uuid.Nil {
+			ready, err := s.serveLayerFromCache(ctx, job.ProjectID, cfg.LayerID, entry)
+			if err == nil {
+				return ready
+			}
+		} else {
+			ready, err := s.serveFromCache(ctx, entry)
+			if err == nil {
+				return ready
+			}
 		}
 	}
 
@@ -346,6 +427,89 @@ func (s *BundleService) warmHotCache(
 		CacheID:     entry.ID,
 	}
 	_ = s.cache.SetJSON(ctx, s.hotCacheKey(projectID, userID, includeRef), hot, 1*time.Hour)
+}
+
+func (s *BundleService) layerHotCacheKey(projectID, layerID uuid.UUID) string {
+	return fmt.Sprintf("bundle:cache:layer:%s:%s", projectID, layerID)
+}
+
+func (s *BundleService) checkLayerHotCache(
+	ctx context.Context, projectID, layerID uuid.UUID,
+) *BundleRequestResult {
+	key := s.layerHotCacheKey(projectID, layerID)
+	var hot hotCacheEntry
+	if err := s.cache.GetJSON(ctx, key, &hot); err != nil {
+		return nil
+	}
+	currentHash, err := s.hashSvc.ComputeLayerRef(ctx, projectID, layerID)
+	if err != nil || currentHash != hot.ContentHash {
+		_ = s.cache.Del(ctx, key)
+		return nil
+	}
+	url, expiry, err := s.presignGet(ctx, hot.StorageKey)
+	if err != nil {
+		_ = s.cache.Del(ctx, key)
+		return nil
+	}
+	go s.bundleCacheRepo.TouchAccessed(context.Background(), hot.CacheID)
+	return &BundleRequestResult{
+		Status:      "ready",
+		ContentHash: hot.ContentHash,
+		DownloadURL: url,
+		Filename:    hot.Filename,
+		SizeBytes:   hot.SizeBytes,
+		Counts:      &hot.Counts,
+		Warnings:    hot.Warnings,
+		ExpiresAt:   &expiry,
+	}
+}
+
+func (s *BundleService) warmLayerHotCache(
+	ctx context.Context, projectID, layerID uuid.UUID, entry *model.BundleCache,
+) {
+	var counts model.BundleCounts
+	_ = json.Unmarshal(entry.Counts, &counts)
+	var warnings []string
+	if len(entry.Warnings) > 0 {
+		_ = json.Unmarshal(entry.Warnings, &warnings)
+	}
+	hot := hotCacheEntry{
+		ContentHash: entry.ContentHash,
+		StorageKey:  entry.StorageKey,
+		Filename:    entry.Filename,
+		SizeBytes:   entry.SizeBytes,
+		Counts:      counts,
+		Warnings:    warnings,
+		CacheID:     entry.ID,
+	}
+	_ = s.cache.SetJSON(ctx, s.layerHotCacheKey(projectID, layerID), hot, 1*time.Hour)
+}
+
+func (s *BundleService) serveLayerFromCache(
+	ctx context.Context, projectID, layerID uuid.UUID, entry *model.BundleCache,
+) (*BundleRequestResult, error) {
+	url, expiry, err := s.presignGet(ctx, entry.StorageKey)
+	if err != nil {
+		return nil, fmt.Errorf("presign download: %w", err)
+	}
+	var counts model.BundleCounts
+	_ = json.Unmarshal(entry.Counts, &counts)
+	var warnings []string
+	if len(entry.Warnings) > 0 {
+		_ = json.Unmarshal(entry.Warnings, &warnings)
+	}
+	s.warmLayerHotCache(ctx, projectID, layerID, entry)
+	go s.bundleCacheRepo.TouchAccessed(context.Background(), entry.ID)
+	return &BundleRequestResult{
+		Status:      "ready",
+		ContentHash: entry.ContentHash,
+		DownloadURL: url,
+		Filename:    entry.Filename,
+		SizeBytes:   entry.SizeBytes,
+		Counts:      &counts,
+		Warnings:    warnings,
+		ExpiresAt:   &expiry,
+	}, nil
 }
 
 func (s *BundleService) serveFromCache(ctx context.Context, entry *model.BundleCache) (*BundleRequestResult, error) {
@@ -437,8 +601,10 @@ func (s *BundleService) ReleaseJobDedupLock(ctx context.Context, job *model.Impo
 // ── Helpers — Job enqueue ─────────────────────────────
 
 type bundleJobConfig struct {
-	IncludeReferenceData bool   `json:"include_reference_data"`
-	ContentHash          string `json:"content_hash"`
+	IncludeReferenceData bool      `json:"include_reference_data"`
+	ContentHash          string    `json:"content_hash"`
+	PackKind             string    `json:"pack_kind,omitempty"` // ""|"project"|"layer_ref"
+	LayerID              uuid.UUID `json:"layer_id,omitempty"`
 }
 
 func (s *BundleService) enqueueJob(
@@ -447,10 +613,36 @@ func (s *BundleService) enqueueJob(
 	cfgJSON, _ := json.Marshal(bundleJobConfig{
 		IncludeReferenceData: includeRef,
 		ContentHash:          contentHash,
+		PackKind:             "project",
 	})
 	job := &model.ImportJob{
 		ProjectID: projectID,
 		JobType:   "bundle_generation",
+		Status:    "pending",
+		Config:    cfgJSON,
+		CreatedBy: userID,
+	}
+	if err := s.importJobRepo.Create(ctx, job); err != nil {
+		return uuid.Nil, err
+	}
+	if s.pool != nil {
+		s.pool.Submit(job)
+	}
+	return job.ID, nil
+}
+
+func (s *BundleService) enqueueLayerRefJob(
+	ctx context.Context, projectID, userID, layerID uuid.UUID, contentHash string,
+) (uuid.UUID, error) {
+	cfgJSON, _ := json.Marshal(bundleJobConfig{
+		IncludeReferenceData: true,
+		ContentHash:          contentHash,
+		PackKind:             "layer_ref",
+		LayerID:              layerID,
+	})
+	job := &model.ImportJob{
+		ProjectID: projectID,
+		JobType:   "layer_reference_pack",
 		Status:    "pending",
 		Config:    cfgJSON,
 		CreatedBy: userID,

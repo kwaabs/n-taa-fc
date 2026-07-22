@@ -177,6 +177,92 @@ func (s *BundleHashService) Compute(
 	return hex.EncodeToString(h[:]), nil
 }
 
+// ComputeLayerRef returns a SHA-256 hash for a single layer's reference pack
+// (GeoJSON + optional mbtiles). Shared across users for the same project AOI.
+func (s *BundleHashService) ComputeLayerRef(
+	ctx context.Context,
+	projectID, layerID uuid.UUID,
+) (string, error) {
+	type tsRow struct {
+		Ts *time.Time `bun:"ts"`
+	}
+
+	var seedParts []string
+	const LayerRefFormatVersion = "v1-layer-ref"
+
+	seedParts = append(seedParts, fmt.Sprintf("fmt:%s", LayerRefFormatVersion))
+	seedParts = append(seedParts, fmt.Sprintf("layer:%s", layerID))
+
+	var projectRow tsRow
+	err := s.db.NewSelect().
+		TableExpr("projects").
+		ColumnExpr("updated_at AS ts").
+		Where("id = ?", projectID).
+		Scan(ctx, &projectRow)
+	if err != nil {
+		return "", fmt.Errorf("hash project: %w", err)
+	}
+	seedParts = append(seedParts, fmt.Sprintf("project:%s", tsStr(projectRow.Ts)))
+
+	var layerRow struct {
+		UpdatedAt    *time.Time      `bun:"updated_at"`
+		SourceType   string          `bun:"source_type"`
+		SourceConfig json.RawMessage `bun:"source_config"`
+		Status       string          `bun:"status"`
+		ProjectID    uuid.UUID       `bun:"project_id"`
+	}
+	err = s.db.NewSelect().
+		TableExpr("layers").
+		ColumnExpr("updated_at, source_type, source_config, status, project_id").
+		Where("id = ?", layerID).
+		Scan(ctx, &layerRow)
+	if err != nil {
+		return "", fmt.Errorf("hash layer: %w", err)
+	}
+	if layerRow.ProjectID != projectID {
+		return "", fmt.Errorf("layer does not belong to project")
+	}
+	seedParts = append(seedParts, fmt.Sprintf("layer_updated:%s", tsStr(layerRow.UpdatedAt)))
+	seedParts = append(seedParts, fmt.Sprintf("status:%s", layerRow.Status))
+	seedParts = append(seedParts, fmt.Sprintf("source_type:%s", layerRow.SourceType))
+
+	if layerRow.SourceType == "linked_table" {
+		var cfg struct {
+			Schema string `json:"schema"`
+			Table  string `json:"table"`
+		}
+		_ = json.Unmarshal(layerRow.SourceConfig, &cfg)
+		if cfg.Schema == "" || cfg.Table == "" {
+			seedParts = append(seedParts, "linked:missing")
+		} else {
+			var count int
+			q := fmt.Sprintf(
+				`SELECT COUNT(*) FROM %s.%s`,
+				pgQuoteIdent(cfg.Schema), pgQuoteIdent(cfg.Table),
+			)
+			if err := s.db.NewRaw(q).Scan(ctx, &count); err != nil {
+				seedParts = append(seedParts, "linked:err")
+			} else {
+				seedParts = append(seedParts, fmt.Sprintf("linked:%d", count))
+			}
+		}
+	} else {
+		var refRow tsRow
+		_ = s.db.NewSelect().
+			TableExpr("features AS f").
+			ColumnExpr("MAX(f.updated_at) AS ts").
+			Where("f.layer_id = ?", layerID).
+			Where("f.source = ?", "reference").
+			Where("f.deleted_at IS NULL").
+			Scan(ctx, &refRow)
+		seedParts = append(seedParts, fmt.Sprintf("ref_features:%s", tsStr(refRow.Ts)))
+	}
+
+	seed := joinParts(seedParts)
+	h := sha256.Sum256([]byte(seed))
+	return hex.EncodeToString(h[:]), nil
+}
+
 func tsStr(t *time.Time) string {
 	if t == nil {
 		return "nil"
