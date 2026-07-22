@@ -1,0 +1,207 @@
+import 'dart:async';
+import 'dart:io' show Platform;
+import 'dart:typed_data';
+
+import 'package:flutter_bluetooth_serial/flutter_bluetooth_serial.dart' as fbs;
+import 'package:permission_handler/permission_handler.dart';
+
+import 'bluetooth_transport.dart';
+
+/// Android implementation using Bluetooth Classic SPP.
+/// Backed by flutter_bluetooth_serial.
+class AndroidSppTransport implements BluetoothTransport {
+  fbs.BluetoothConnection? _connection;
+  StreamController<List<int>>? _dataController;
+  StreamSubscription<Uint8List>? _readSub;
+
+  final _connectionStateController =
+      StreamController<BtConnectionState>.broadcast();
+  BtConnectionState _lastState = BtConnectionState.idle;
+
+  StreamController<BtDevice>? _scanController;
+  StreamSubscription<fbs.BluetoothDiscoveryResult>? _discoverySub;
+  Timer? _scanTimeout;
+
+  void _setState(BtConnectionState next) {
+    if (_lastState == next) return;
+    _lastState = next;
+    _connectionStateController.add(next);
+  }
+
+  @override
+  Future<bool> get isAvailable async {
+    if (!Platform.isAndroid) return false;
+    try {
+      final avail = await fbs.FlutterBluetoothSerial.instance.isAvailable;
+      return avail ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> get isEnabled async {
+    try {
+      final on = await fbs.FlutterBluetoothSerial.instance.isEnabled;
+      return on ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Future<bool> requestPermissions() async {
+    // Android 12+ needs BLUETOOTH_SCAN + BLUETOOTH_CONNECT. Older Android
+    // needs ACCESS_FINE_LOCATION only.
+    final results = await [
+      Permission.bluetoothScan,
+      Permission.bluetoothConnect,
+      Permission.locationWhenInUse,
+    ].request();
+
+    for (final entry in results.entries) {
+      if (!entry.value.isGranted) return false;
+    }
+    return true;
+  }
+
+  @override
+  Future<bool> requestEnable() async {
+    try {
+      final ok = await fbs.FlutterBluetoothSerial.instance.requestEnable();
+      return ok ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
+  Stream<BtDevice> scan({Duration timeout = const Duration(seconds: 10)}) {
+    // Ensure any prior scan is cancelled cleanly
+    _stopScanInternal();
+
+    _scanController = StreamController<BtDevice>.broadcast(
+      onCancel: _stopScanInternal,
+    );
+    _setState(BtConnectionState.scanning);
+
+    _discoverySub = fbs.FlutterBluetoothSerial.instance
+        .startDiscovery()
+        .listen((result) {
+      final dev = result.device;
+      _scanController?.add(
+        BtDevice(
+          address: dev.address,
+          name: dev.name ?? 'Unknown device',
+          rssi: result.rssi,
+          paired: dev.isBonded,
+        ),
+      );
+    }, onDone: () {
+      _setState(BtConnectionState.idle);
+      _scanController?.close();
+    }, onError: (e) {
+      _setState(BtConnectionState.error);
+      _scanController?.addError(e);
+    });
+
+    _scanTimeout = Timer(timeout, _stopScanInternal);
+    return _scanController!.stream;
+  }
+
+  @override
+  Future<void> stopScan() async {
+    _stopScanInternal();
+  }
+
+  void _stopScanInternal() {
+    _scanTimeout?.cancel();
+    _scanTimeout = null;
+    _discoverySub?.cancel();
+    _discoverySub = null;
+    try {
+      fbs.FlutterBluetoothSerial.instance.cancelDiscovery();
+    } catch (_) {}
+    if (_lastState == BtConnectionState.scanning) {
+      _setState(BtConnectionState.idle);
+    }
+  }
+
+  @override
+  Future<List<BtDevice>> pairedDevices() async {
+    try {
+      final bonded = await fbs.FlutterBluetoothSerial.instance.getBondedDevices();
+      return bonded
+          .map((d) => BtDevice(
+                address: d.address,
+                name: d.name ?? 'Unknown device',
+                paired: true,
+              ))
+          .toList();
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  @override
+  Future<void> connect(BtDevice device) async {
+    if (_connection != null) {
+      await disconnect();
+    }
+    _setState(BtConnectionState.connecting);
+    try {
+      _connection = await fbs.BluetoothConnection.toAddress(device.address);
+      _dataController = StreamController<List<int>>.broadcast();
+
+      _readSub = _connection!.input?.listen(
+        (bytes) {
+          _dataController?.add(bytes.toList());
+        },
+        onDone: () {
+          _setState(BtConnectionState.idle);
+          _cleanup();
+        },
+        onError: (e) {
+          _setState(BtConnectionState.error);
+          _dataController?.addError(e);
+        },
+      );
+
+      _setState(BtConnectionState.connected);
+    } catch (e) {
+      _setState(BtConnectionState.error);
+      _cleanup();
+      throw BluetoothException('Failed to connect to ${device.name}', e);
+    }
+  }
+
+  @override
+  Future<void> disconnect() async {
+    if (_connection == null) return;
+    _setState(BtConnectionState.disconnecting);
+    try {
+      await _connection?.finish();
+    } catch (_) {}
+    _cleanup();
+    _setState(BtConnectionState.idle);
+  }
+
+  void _cleanup() {
+    _readSub?.cancel();
+    _readSub = null;
+    _dataController?.close();
+    _dataController = null;
+    _connection = null;
+  }
+
+  @override
+  Stream<List<int>> get dataStream {
+    return _dataController?.stream ?? const Stream<List<int>>.empty();
+  }
+
+  @override
+  Stream<BtConnectionState> get connectionState => _connectionStateController.stream;
+
+  @override
+  bool get isConnected => _connection?.isConnected ?? false;
+}

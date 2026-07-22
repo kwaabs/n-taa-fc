@@ -1,0 +1,162 @@
+name: n-taa-fc
+
+services:
+  # -- PostgreSQL (Supabase image — includes PostGIS + extensions) --
+  postgres:
+    image: supabase/postgres:15.14.1.095
+    container_name: ntaafc-postgres
+    restart: unless-stopped
+    ports:
+      - "5350:5432"
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    environment:
+      POSTGRES_PASSWORD: ntaafc
+      POSTGRES_DB: ntaafc
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Creates app/dbo schemas + geo_app role on first boot only
+      - ./postgres/bootstrap.sql:/docker-entrypoint-initdb.d/01-bootstrap.sql:ro
+      # Full postgres SQL tree for make geo-bootstrap / geo-migrate
+      - ./postgres:/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d ntaafc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # -- Valkey (Redis alternative) --
+  valkey:
+    image: valkey/valkey:7
+    container_name: ntaafc-valkey
+    restart: unless-stopped
+    ports:
+      - "5351:6379"
+    volumes:
+      - valkeydata:/data
+
+  # -- RustFS (S3-compatible storage) --
+  rustfs:
+    image: rustfs/rustfs:latest
+    container_name: ntaafc-rustfs
+    restart: unless-stopped
+    ports:
+      - "5352:9000"
+      - "5353:9001"
+    environment:
+      RUSTFS_ACCESS_KEY: rustfsadmin
+      RUSTFS_SECRET_KEY: rustfsadmin
+      RUSTFS_CONSOLE_ENABLE: "true"
+      RUSTFS_ADDRESS: ":9000"
+      RUSTFS_CONSOLE_ADDRESS: ":9001"
+    volumes:
+      - rustfsdata:/data
+    command: /data
+
+  rustfs-init:
+    image: rustfs/rc
+    container_name: ntaafc-rustfs-init
+    depends_on:
+      - rustfs
+    entrypoint: >
+      /bin/sh -c "
+        sleep 3;
+        rc alias set local http://rustfs:9000 rustfsadmin rustfsadmin;
+        rc mb local/field-collector --ignore-existing;
+        rc anonymous set download local/field-collector/public;
+        echo 'Bucket ready';
+      "
+
+  # -- Martin (vector tile server for PostGIS) --
+  martin:
+    image: ghcr.io/maplibre/martin:latest
+    container_name: ntaafc-martin
+    restart: unless-stopped
+    ports:
+      - "5360:3000"
+    environment:
+      DATABASE_URL: "postgres://geo_app:geo_app_dev_pw@postgres:5432/ntaafc?sslmode=disable"
+      RUST_LOG: "info"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./martin/config.yaml:/config/config.yaml:ro
+    command: ["--config", "/config/config.yaml"]
+
+  # -- Tippecanoe HTTP wrapper (vector tile generator) --
+  tippecanoe:
+    build:
+      context: ../docker/tippecanoe
+      dockerfile: Dockerfile
+    container_name: ntaafc-tippecanoe
+    restart: unless-stopped
+    ports:
+      - "5361:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # -- GoTrue (Supabase Auth) — used by Field Collector --
+  gotrue:
+    image: supabase/gotrue:v2.167.0
+    container_name: ntaafc-gotrue
+    restart: unless-stopped
+    ports:
+      - "5354:8081"
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_NAMESPACE: auth
+      GOTRUE_DB_DATABASE_URL: "postgres://supabase_admin:ntaafc@postgres:5432/ntaafc?sslmode=disable&search_path=auth"
+
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 8081
+      API_EXTERNAL_URL: http://localhost:5354
+      # Primary site is FC web; geo-web callbacks allowed via URI_ALLOW_LIST
+      GOTRUE_SITE_URL: http://localhost:5356
+
+      GOTRUE_URI_ALLOW_LIST: "http://localhost:5356,http://localhost:5356/*,http://localhost:5357,http://localhost:5357/*,fieldcollector://auth-callback"
+
+      GOTRUE_JWT_SECRET: super-secret-jwt-key-change-me-in-production
+      GOTRUE_JWT_EXP: 3600
+
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_ADMIN_EMAIL: admin@ntaafc.local
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+
+      GOTRUE_EXTERNAL_AZURE_ENABLED: "true"
+      GOTRUE_EXTERNAL_AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_AZURE_SECRET: ${AZURE_CLIENT_SECRET:-}
+      GOTRUE_EXTERNAL_AZURE_REDIRECT_URI: http://localhost:5354/callback
+      GOTRUE_EXTERNAL_AZURE_URL: https://login.microsoftonline.com/${AZURE_TENANT_ID:-common}
+      GOTRUE_EXTERNAL_AZURE_SCOPES: "openid email profile User.Read"
+
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "true"
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: http://localhost:5354/callback
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # -- golang-migrate for Field Collector schema (profile: tools) --
+  migrate:
+    image: migrate/migrate:v4.18.1
+    profiles: ["tools"]
+    volumes:
+      - ../services/fc-api/migrations:/migrations:ro
+    entrypoint: ["migrate", "-path", "/migrations", "-database"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  valkeydata:
+  rustfsdata:

@@ -1,0 +1,38 @@
+# Martin tile server configuration
+# Docs: https://maplibre.org/martin/
+
+listen_addresses: "0.0.0.0:3000"
+
+worker_processes: 2
+
+cors:
+  origin:
+    - "http://localhost:5356"
+    - "http://localhost:5357"
+    - "http://localhost:5442"
+    - "http://localhost:5355"
+    - "http://localhost:3000"
+
+postgres:
+  connection_string: ${DATABASE_URL}
+  pool_size: 10
+
+  # Auto-publish geometry tables in dbo only (geo-app GIS layers).
+  # Do not publish FC public.* or GoTrue auth.*.
+  auto_publish:
+    from_schemas:
+      - dbo
+    tables:
+      source_id_format: "{schema}.{table}"
+      id_columns: ogc_fid
+    functions:
+      from_schemas:
+        - dbo
+      source_id_format: "{schema}.{function}"
+
+  # Field Collector map tiles (public.reference_features MVT function).
+  # Kept explicit so dbo-only auto_publish does not hide it.
+  functions:
+    reference_features:
+      schema: public
+      function: reference_features

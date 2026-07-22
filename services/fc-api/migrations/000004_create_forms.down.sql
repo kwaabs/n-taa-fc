@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS choice_lists;
+DROP TABLE IF EXISTS form_versions;
+DROP TABLE IF EXISTS forms;
