@@ -323,9 +323,13 @@ func main() {
 				r.With(middleware.RequireRole(accessService, "admin")).
 					Post("/dispatch", projectHandler.Dispatch)
 
-				// Bundle
+				// Bundle (full pack) + efficient-sync slim core pack
 				r.Route("/bundle", func(r chi.Router) {
 					r.Get("/", bundleHandler.Request)
+					r.Get("/jobs/{jobID}", bundleHandler.GetJob)
+				})
+				r.Route("/core-pack", func(r chi.Router) {
+					r.Get("/", bundleHandler.RequestCore)
 					r.Get("/jobs/{jobID}", bundleHandler.GetJob)
 				})
 

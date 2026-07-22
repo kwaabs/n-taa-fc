@@ -47,7 +47,32 @@ func (h *BundleHandler) Request(w http.ResponseWriter, r *http.Request) {
     RespondJSON(w, status, result)
 }
 
+// RequestCore is the efficient-sync slim core pack: project metadata, forms,
+// layer catalog, choice lists, and assignments — without reference GeoJSON/mbtiles.
+// Equivalent to GET .../bundle?reference_data=false.
+//
+// GET /api/v1/projects/{projectID}/core-pack
+func (h *BundleHandler) RequestCore(w http.ResponseWriter, r *http.Request) {
+    projectID, err := uuid.Parse(chi.URLParam(r, "projectID"))
+    if err != nil {
+        RespondError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+        return
+    }
+    userID := middleware.GetUserID(r.Context())
+    result, err := h.svc.RequestBundle(r.Context(), projectID, userID, false)
+    if err != nil {
+        RespondError(w, http.StatusBadRequest, "CORE_PACK_REQUEST_FAILED", err.Error())
+        return
+    }
+    status := http.StatusOK
+    if result.Status != "ready" {
+        status = http.StatusAccepted
+    }
+    RespondJSON(w, status, result)
+}
+
 // GET /api/v1/projects/{projectID}/bundle/jobs/{jobID}
+// Also used to poll core-pack jobs (same job store).
 func (h *BundleHandler) GetJob(w http.ResponseWriter, r *http.Request) {
     jobID, err := uuid.Parse(chi.URLParam(r, "jobID"))
     if err != nil {
