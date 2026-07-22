@@ -52,8 +52,14 @@ Legacy full bundle remains behind an optional toggle.
 2. Features → `POST .../sync/push` in batches (insert/update/delete)  
 3. `sync/verify` for crash recovery  
 
+### Upload hardening (landed)
+
+- fc-api DB pool caps: `DB_MAX_OPEN_CONNS` (20), `DB_MAX_IDLE_CONNS` (5), `DB_CONN_MAX_LIFETIME` (30m)
+- Auth profile upsert debounced via Valkey (`AUTH_PROFILE_UPSERT_TTL`, default 5m)
+- Mobile sync: exponential backoff on retryable push batches (up to 3 attempts) and attachment uploads
+
 ## Capacity (later phases)
 
 - fc-api replicas behind OSS LB (JWT, no sticky sessions)
-- DB pool caps; warm core + hot layer packs before peak
+- Warm core + hot layer packs before peak
 - Incremental manifests + CDN for pack bytes

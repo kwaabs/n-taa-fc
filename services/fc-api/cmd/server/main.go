@@ -44,6 +44,9 @@ func main() {
 
 	// ── Database ──────────────────────────────────────
 	sqldb := sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(cfg.DatabaseURL)))
+	sqldb.SetMaxOpenConns(cfg.DBMaxOpenConns)
+	sqldb.SetMaxIdleConns(cfg.DBMaxIdleConns)
+	sqldb.SetConnMaxLifetime(cfg.DBConnMaxLifetime)
 	db := bun.NewDB(sqldb, pgdialect.New())
 	defer db.Close()
 
@@ -51,7 +54,11 @@ func main() {
 		slog.Error("failed to connect to database", "error", err)
 		os.Exit(1)
 	}
-	slog.Info("connected to database")
+	slog.Info("connected to database",
+		"max_open_conns", cfg.DBMaxOpenConns,
+		"max_idle_conns", cfg.DBMaxIdleConns,
+		"conn_max_lifetime", cfg.DBConnMaxLifetime.String(),
+	)
 
 	// ── Repositories ──────────────────────────────────
 	userRepo := repository.NewUserRepo(db)
@@ -252,7 +259,7 @@ func main() {
 
 	// ── Authenticated routes ───────────────────────────
 	r.Group(func(r chi.Router) {
-		r.Use(middleware.NewAuthMiddleware(cfg.JWTSecret, userRepo))
+		r.Use(middleware.NewAuthMiddleware(cfg.JWTSecret, userRepo, cacheClient, cfg.AuthProfileUpsertTTL))
 
 		// Current user
 		r.Get("/api/v1/me", meHandler.Get)

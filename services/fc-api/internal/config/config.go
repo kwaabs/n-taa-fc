@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -25,6 +26,9 @@ type Config struct {
 	Port             string
 	Env              string
 	DatabaseURL      string
+	DBMaxOpenConns   int
+	DBMaxIdleConns   int
+	DBConnMaxLifetime time.Duration
 	JWTSecret        string
 	CORSOrigins      string
 	S3Endpoint       string
@@ -37,32 +41,58 @@ type Config struct {
 	ValkeyPass       string
 	ValkeyDB         int
 	GoTrueURL        string
+	// AuthProfileUpsertTTL skips profile upserts when a recent cache hit exists.
+	AuthProfileUpsertTTL time.Duration
 }
 
 func Load() *Config {
 	_ = godotenv.Load()
 
 	return &Config{
-		Port:             getEnv("PORT", "5355"),
-		Env:              getEnv("ENV", "development"),
-		DatabaseURL:      getEnv("DATABASE_URL", "postgres://supabase_admin:ntaafc@localhost:5350/ntaafc?sslmode=disable"),
-		JWTSecret:        getEnv("JWT_SECRET", "super-secret-jwt-key-change-me-in-production"),
-		CORSOrigins:      getEnv("CORS_ORIGINS", "http://localhost:5356,http://localhost:3000,http://localhost:53397"),
-		S3Endpoint:       getEnv("S3_ENDPOINT", "http://localhost:5352"),
-		S3PublicEndpoint: getEnv("S3_PUBLIC_ENDPOINT", "http://localhost:5352"),
-		S3Bucket:         getEnv("S3_BUCKET", "field-collector"),
-		S3AccessKey:      getEnv("S3_ACCESS_KEY", "rustfsadmin"),
-		S3SecretKey:      getEnv("S3_SECRET_KEY", "rustfsadmin"),
-		S3UseSSL:         getEnv("S3_USE_SSL", "false") == "true",
-		ValkeyURL:        getEnv("VALKEY_URL", "redis://localhost:5351"),
-		ValkeyPass:       getEnv("VALKEY_PASSWORD", ""),
-		GoTrueURL:        getEnv("GOTRUE_URL", "http://localhost:5354"),
+		Port:                 getEnv("PORT", "5355"),
+		Env:                  getEnv("ENV", "development"),
+		DatabaseURL:          getEnv("DATABASE_URL", "postgres://supabase_admin:ntaafc@localhost:5350/ntaafc?sslmode=disable"),
+		DBMaxOpenConns:       getEnvInt("DB_MAX_OPEN_CONNS", 20),
+		DBMaxIdleConns:       getEnvInt("DB_MAX_IDLE_CONNS", 5),
+		DBConnMaxLifetime:     getEnvDuration("DB_CONN_MAX_LIFETIME", 30*time.Minute),
+		JWTSecret:            getEnv("JWT_SECRET", "super-secret-jwt-key-change-me-in-production"),
+		CORSOrigins:          getEnv("CORS_ORIGINS", "http://localhost:5356,http://localhost:3000,http://localhost:53397"),
+		S3Endpoint:           getEnv("S3_ENDPOINT", "http://localhost:5352"),
+		S3PublicEndpoint:     getEnv("S3_PUBLIC_ENDPOINT", "http://localhost:5352"),
+		S3Bucket:             getEnv("S3_BUCKET", "field-collector"),
+		S3AccessKey:          getEnv("S3_ACCESS_KEY", "rustfsadmin"),
+		S3SecretKey:          getEnv("S3_SECRET_KEY", "rustfsadmin"),
+		S3UseSSL:             getEnv("S3_USE_SSL", "false") == "true",
+		ValkeyURL:            getEnv("VALKEY_URL", "redis://localhost:5351"),
+		ValkeyPass:           getEnv("VALKEY_PASSWORD", ""),
+		GoTrueURL:            getEnv("GOTRUE_URL", "http://localhost:5354"),
+		AuthProfileUpsertTTL: getEnvDuration("AUTH_PROFILE_UPSERT_TTL", 5*time.Minute),
 	}
 }
 
 func getEnv(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
+	}
+	return fallback
+}
+
+func getEnvInt(key string, fallback int) int {
+	if value, ok := os.LookupEnv(key); ok {
+		n, err := strconv.Atoi(value)
+		if err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if value, ok := os.LookupEnv(key); ok {
+		d, err := time.ParseDuration(value)
+		if err == nil {
+			return d
+		}
 	}
 	return fallback
 }

@@ -18,6 +18,9 @@ import 'sync_log_repository.dart';
 
 const int _kPushChunkSize = 50;
 const _kDeviceIdPrefKey = 'fc_device_id';
+const Duration _kBackoffBase = Duration(milliseconds: 500);
+const Duration _kBackoffMax = Duration(seconds: 30);
+const int _kAttachmentMaxAttempts = 3;
 
 bool _isOutsideAoiRejection(String reason) {
   final r = reason.toLowerCase();
@@ -128,11 +131,24 @@ class SyncService {
           continue;
         }
 
-        final ok = await _uploadAttachment(
-          projectId: projectId,
-          featureClientId: feature.clientId,
-          attachment: att,
-        );
+        var ok = false;
+        for (var attempt = 1; attempt <= _kAttachmentMaxAttempts; attempt++) {
+          if (attempt > 1) {
+            final delay = _backoffDelay(attempt - 1);
+            debugPrint('[SYNC] attachment retry ${att.clientId} '
+                'after ${delay.inMilliseconds}ms (attempt $attempt)');
+            await Future<void>.delayed(delay);
+          }
+          ok = await _uploadAttachment(
+            projectId: projectId,
+            featureClientId: feature.clientId,
+            attachment: att,
+          );
+          if (ok) break;
+          // Only retry network-style pending failures; status already set.
+          final refreshed = await db.getAttachment(att.clientId);
+          if (refreshed?.status == 'failed') break;
+        }
 
         if (ok) {
           attachmentsUploaded++;
@@ -173,15 +189,7 @@ class SyncService {
             : readyFeatures.length;
         final batch = readyFeatures.sublist(start, end);
 
-        onProgress?.call(SyncProgress(
-          totalFeatures: features.length,
-          processedFeatures: features.length - pending,
-          currentStep: 'Pushing batch ${(start ~/ _kPushChunkSize) + 1}'
-              ' of ${(readyFeatures.length / _kPushChunkSize).ceil()}'
-              ' (${batch.length} features)...',
-        ));
-
-        // Build the batch payload
+        // Build the batch payload once
         final payloads = <Map<String, dynamic>>[];
         for (final f in batch) {
           final payload = await _buildFeaturePayload(
@@ -191,72 +199,102 @@ class SyncService {
           payloads.add(payload);
         }
 
-        final result = await pushRepo.push(
-          projectId: projectId,
-          features: payloads,
-        );
+        var batchDone = false;
+        for (var attempt = 1; attempt <= 3 && !batchDone; attempt++) {
+          if (attempt > 1) {
+            final delay = _backoffDelay(attempt - 1);
+            debugPrint('[SYNC] retrying batch after ${delay.inMilliseconds}ms '
+                '(attempt $attempt/3)');
+            onProgress?.call(SyncProgress(
+              totalFeatures: features.length,
+              processedFeatures: features.length - pending,
+              currentStep:
+                  'Retrying push in ${delay.inSeconds}s (attempt $attempt/3)…',
+            ));
+            await Future<void>.delayed(delay);
+          }
 
-        if (result.hasOverallError) {
-          debugPrint('[SYNC]   batch errored: ${result.overallError}');
-          final isRetryable =
-              result.errorType == AttachmentFailureType.network ||
-                  result.errorType == AttachmentFailureType.server;
-          final newStatus = isRetryable ? 'pending' : 'failed';
+          onProgress?.call(SyncProgress(
+            totalFeatures: features.length,
+            processedFeatures: features.length - pending,
+            currentStep: 'Pushing batch ${(start ~/ _kPushChunkSize) + 1}'
+                ' of ${(readyFeatures.length / _kPushChunkSize).ceil()}'
+                ' (${batch.length} features)...',
+          ));
 
+          final result = await pushRepo.push(
+            projectId: projectId,
+            features: payloads,
+          );
+
+          if (result.hasOverallError) {
+            debugPrint('[SYNC]   batch errored: ${result.overallError}');
+            final isRetryable =
+                result.errorType == AttachmentFailureType.network ||
+                    result.errorType == AttachmentFailureType.server;
+            if (isRetryable && attempt < 3) {
+              continue;
+            }
+
+            final newStatus = isRetryable ? 'pending' : 'failed';
+            for (final f in batch) {
+              await featureRepo.markFeatureStatus(
+                clientId: f.clientId,
+                status: newStatus,
+                lastError: result.overallError,
+              );
+              if (isRetryable) {
+                pending++;
+              } else {
+                failed++;
+              }
+              errors
+                  .add('${f.clientId.substring(0, 8)}: ${result.overallError}');
+
+              await syncLogRepo.logError(
+                runId: runId,
+                featureClientId: f.clientId,
+                errorCode: isRetryable ? 'batch_retryable' : 'batch_failed',
+                errorMessage: result.overallError,
+              );
+            }
+            batchDone = true;
+            continue;
+          }
+
+          // Per-feature result handling
           for (final f in batch) {
-            await featureRepo.markFeatureStatus(
-              clientId: f.clientId,
-              status: newStatus,
-              lastError: result.overallError,
-            );
-            if (isRetryable) {
-              pending++;
-            } else {
+            if (result.rejected.containsKey(f.clientId)) {
+              final reason = result.rejected[f.clientId]!;
+              await featureRepo.markFeatureStatus(
+                clientId: f.clientId,
+                status: 'failed',
+                lastError: reason,
+              );
               failed++;
+              if (_isOutsideAoiRejection(reason)) {
+                outsideAoi++;
+              }
+              errors.add('${f.clientId.substring(0, 8)}: $reason');
+
+              await syncLogRepo.logError(
+                runId: runId,
+                featureClientId: f.clientId,
+                errorCode: _isOutsideAoiRejection(reason)
+                    ? 'outside_aoi'
+                    : 'rejected',
+                errorMessage: reason,
+              );
+            } else {
+              await featureRepo.markFeatureStatus(
+                clientId: f.clientId,
+                status: 'synced',
+                syncedAt: DateTime.now(),
+              );
+              synced++;
             }
-            errors.add('${f.clientId.substring(0, 8)}: ${result.overallError}');
-
-            await syncLogRepo.logError(
-              runId: runId,
-              featureClientId: f.clientId,
-              errorCode: isRetryable ? 'batch_retryable' : 'batch_failed',
-              errorMessage: result.overallError,
-            );
           }
-          continue;
-        }
-
-        // Per-feature result handling
-        for (final f in batch) {
-          if (result.rejected.containsKey(f.clientId)) {
-            final reason = result.rejected[f.clientId]!;
-            await featureRepo.markFeatureStatus(
-              clientId: f.clientId,
-              status: 'failed',
-              lastError: reason,
-            );
-            failed++;
-            if (_isOutsideAoiRejection(reason)) {
-              outsideAoi++;
-            }
-            errors.add('${f.clientId.substring(0, 8)}: $reason');
-
-            await syncLogRepo.logError(
-              runId: runId,
-              featureClientId: f.clientId,
-              errorCode: _isOutsideAoiRejection(reason)
-                  ? 'outside_aoi'
-                  : 'rejected',
-              errorMessage: reason,
-            );
-          } else {
-            await featureRepo.markFeatureStatus(
-              clientId: f.clientId,
-              status: 'synced',
-              syncedAt: DateTime.now(),
-            );
-            synced++;
-          }
+          batchDone = true;
         }
       }
     }
@@ -668,6 +706,15 @@ class SyncService {
         .get();
     return result.length;
   }
+}
+
+Duration _backoffDelay(int failureCount) {
+  if (failureCount <= 0) return _kBackoffBase;
+  var ms = _kBackoffBase.inMilliseconds * (1 << (failureCount - 1));
+  if (ms > _kBackoffMax.inMilliseconds) {
+    ms = _kBackoffMax.inMilliseconds;
+  }
+  return Duration(milliseconds: ms);
 }
 
 // ── Provider ─────────────────────────────────────
