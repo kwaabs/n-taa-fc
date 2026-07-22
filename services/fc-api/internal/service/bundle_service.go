@@ -328,6 +328,57 @@ func (s *BundleService) WarmProjectPacks(
 	return out, nil
 }
 
+// PacksManifest lists content hashes so clients can skip unchanged packs.
+type PacksManifest struct {
+	CoreHash string                 `json:"core_hash"`
+	Layers   []PacksManifestLayer   `json:"layers"`
+}
+
+type PacksManifestLayer struct {
+	LayerID     uuid.UUID `json:"layer_id"`
+	Name        string    `json:"name,omitempty"`
+	Status      string    `json:"status,omitempty"`
+	ContentHash string    `json:"content_hash"`
+}
+
+// GetPacksManifest returns current core + per-layer content hashes.
+func (s *BundleService) GetPacksManifest(
+	ctx context.Context,
+	projectID, userID uuid.UUID,
+) (*PacksManifest, error) {
+	ok, err := s.accessSvc.CanAccess(ctx, userID, projectID)
+	if err != nil || !ok {
+		return nil, fmt.Errorf("access denied: not a project member")
+	}
+
+	coreHash, err := s.hashSvc.Compute(ctx, projectID, userID, false)
+	if err != nil {
+		return nil, fmt.Errorf("core hash: %w", err)
+	}
+
+	out := &PacksManifest{CoreHash: coreHash}
+	if s.layerRepo == nil {
+		return out, nil
+	}
+	layers, err := s.layerRepo.ListByProject(ctx, projectID)
+	if err != nil {
+		return nil, fmt.Errorf("list layers: %w", err)
+	}
+	for _, layer := range layers {
+		h, hashErr := s.hashSvc.ComputeLayerRef(ctx, projectID, layer.ID)
+		if hashErr != nil {
+			continue
+		}
+		out.Layers = append(out.Layers, PacksManifestLayer{
+			LayerID:     layer.ID,
+			Name:        layer.Name,
+			Status:      layer.Status,
+			ContentHash: h,
+		})
+	}
+	return out, nil
+}
+
 // ── Job status polling ────────────────────────────────
 
 type BundleJobView struct {

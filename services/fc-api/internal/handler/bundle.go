@@ -146,3 +146,21 @@ func (h *BundleHandler) WarmPacks(w http.ResponseWriter, r *http.Request) {
 	}
 	RespondJSON(w, http.StatusAccepted, result)
 }
+
+// GetPacksManifest returns content hashes for incremental download.
+//
+// GET /api/v1/projects/{projectID}/packs/manifest
+func (h *BundleHandler) GetPacksManifest(w http.ResponseWriter, r *http.Request) {
+	projectID, err := uuid.Parse(chi.URLParam(r, "projectID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+	userID := middleware.GetUserID(r.Context())
+	manifest, err := h.svc.GetPacksManifest(r.Context(), projectID, userID)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "MANIFEST_FAILED", err.Error())
+		return
+	}
+	RespondJSON(w, http.StatusOK, manifest)
+}

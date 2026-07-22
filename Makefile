@@ -36,6 +36,7 @@ help:
 	@echo   infra-logs / infra-ps / migrate-up / migrate-down / migrate-version
 	@echo   geo-bootstrap / geo-migrate / env-files / setup
 	@echo   fc-api / geo-api / fc-web / geo-web
+	@echo   fc-api-up / fc-api-down   (replicas behind Caddy :5355)
 	@echo   mobile-run / adb-reverse / adb-reverse-status / adb-reverse-clear
 	@echo   smoke / psql / geo-seed-layers
 

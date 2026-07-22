@@ -44,6 +44,35 @@ class BundleReady {
   }
 }
 
+class PacksManifest {
+  final String coreHash;
+  final Map<String, String> layerHashes; // layerId -> contentHash
+
+  const PacksManifest({
+    required this.coreHash,
+    required this.layerHashes,
+  });
+
+  factory PacksManifest.fromJson(Map<String, dynamic> json) {
+    final layers = <String, String>{};
+    final raw = json['layers'];
+    if (raw is List) {
+      for (final item in raw) {
+        if (item is! Map) continue;
+        final id = item['layer_id']?.toString();
+        final hash = item['content_hash']?.toString();
+        if (id != null && id.isNotEmpty && hash != null && hash.isNotEmpty) {
+          layers[id] = hash;
+        }
+      }
+    }
+    return PacksManifest(
+      coreHash: json['core_hash']?.toString() ?? '',
+      layerHashes: layers,
+    );
+  }
+}
+
 typedef BundleJobView = ({
   BundleReady? ready,
   BundleProgress? progress,
@@ -87,6 +116,20 @@ class BundleRepository {
     required String jobId,
   }) {
     return _pollPack('/api/v1/projects/$projectId/core-pack/jobs/$jobId');
+  }
+
+  /// Content hashes for incremental download (skip unchanged packs).
+  Future<PacksManifest> getPacksManifest({required String projectId}) async {
+    final response =
+        await _dio.get('/api/v1/projects/$projectId/packs/manifest');
+    if (response.statusCode != 200) {
+      throw Exception('Manifest request failed (HTTP ${response.statusCode})');
+    }
+    final data = unwrap<Map<String, dynamic>>(
+      response.data,
+      (d) => d as Map<String, dynamic>,
+    );
+    return PacksManifest.fromJson(data);
   }
 
   /// Per-layer reference GeoJSON (+ optional mbtiles).

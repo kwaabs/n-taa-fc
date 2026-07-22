@@ -82,6 +82,14 @@ Content-Type: application/json
 
 Enqueues slim core (caller-scoped) + per-layer reference packs. Layer packs share Valkey hot keys across devices — use before peak shift.
 
-## Capacity (later)
+### Incremental manifest (landed)
 
-- Incremental manifests + CDN for pack bytes
+```http
+GET /api/v1/projects/{projectID}/packs/manifest
+```
+
+Returns `core_hash` + per-layer `content_hash`. Mobile skips core/layer downloads when local hashes match.
+
+### CDN for pack bytes
+
+Point `S3_PUBLIC_ENDPOINT` (and CDN origin) at a CDN in front of RustFS/S3. Presigned download URLs use that host — no API change required. Keep `S3_ENDPOINT` as the internal origin for PUT/stat.

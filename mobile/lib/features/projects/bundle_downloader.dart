@@ -4,6 +4,7 @@ import 'package:drift/drift.dart' show Value;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/db/app_database.dart' as db;
 import '../../core/db/bundle_seeder.dart';
@@ -117,6 +118,7 @@ class BundleDownloader {
   }
 
   /// Core pack first, then per-layer reference packs for the working set.
+  /// Uses packs/manifest hashes to skip unchanged downloads.
   Future<({BundleReady ready, SeedResult? seedResult, int downloadedBytes})>
       downloadEfficient({
     required Project project,
@@ -126,32 +128,76 @@ class BundleDownloader {
     final projectId = project.id;
     await ensureProjectRow(project);
 
-    onProgress(const EfficientDownloadProgress(message: 'Requesting core pack…'));
-    final coreReady = await _awaitReady(
-      request: () => repo.requestCore(projectId: projectId),
-      poll: (jobId) => repo.pollCoreJob(projectId: projectId, jobId: jobId),
-      onProgress: (p) => onProgress(EfficientDownloadProgress(
-        message: 'Building core pack…',
-        jobProgress: p,
-      )),
-    );
+    PacksManifest? manifest;
+    try {
+      onProgress(const EfficientDownloadProgress(message: 'Checking pack versions…'));
+      manifest = await repo.getPacksManifest(projectId: projectId);
+    } catch (e) {
+      debugPrint('[BUNDLE] manifest unavailable, full download: $e');
+    }
 
-    onProgress(EfficientDownloadProgress(
-      message: 'Downloading core pack…',
-      jobProgress: BundleProgress(step: 'download', percent: 0),
-    ));
-    final coreBytes = await downloadBundle(coreReady);
-    var totalBytes = coreBytes.bytes.length;
+    final localLayerHashes = await _loadLayerHashes(projectId);
+    final localCoreHash = await _localCoreHash(projectId);
+    final skipCore = manifest != null &&
+        manifest.coreHash.isNotEmpty &&
+        localCoreHash != null &&
+        localCoreHash == manifest.coreHash;
 
-    onProgress(const EfficientDownloadProgress(message: 'Seeding core pack…'));
-    var seed = await seedAndRecord(projectId: projectId, result: coreBytes);
-    seed ??= const SeedResult(
-      forms: 0,
-      layers: 0,
-      choiceLists: 0,
-      assignments: 0,
-      referenceFeatures: 0,
-    );
+    late BundleReady coreReady;
+    var totalBytes = 0;
+    SeedResult? seed;
+
+    if (skipCore) {
+      debugPrint('[BUNDLE] core pack unchanged — skipping download');
+      onProgress(const EfficientDownloadProgress(
+        message: 'Core pack up to date — skipping…',
+      ));
+      coreReady = BundleReady(
+        filename: 'core-pack (cached)',
+        downloadUrl: '',
+        sizeBytes: 0,
+        contentHash: localCoreHash,
+      );
+      seed = const SeedResult(
+        forms: 0,
+        layers: 0,
+        choiceLists: 0,
+        assignments: 0,
+        referenceFeatures: 0,
+      );
+    } else {
+      onProgress(
+          const EfficientDownloadProgress(message: 'Requesting core pack…'));
+      coreReady = await _awaitReady(
+        request: () => repo.requestCore(projectId: projectId),
+        poll: (jobId) => repo.pollCoreJob(projectId: projectId, jobId: jobId),
+        onProgress: (p) => onProgress(EfficientDownloadProgress(
+          message: 'Building core pack…',
+          jobProgress: p,
+        )),
+      );
+
+      onProgress(EfficientDownloadProgress(
+        message: 'Downloading core pack…',
+        jobProgress: const BundleProgress(step: 'download', percent: 0),
+      ));
+      final coreBytes = await downloadBundle(coreReady);
+      totalBytes = coreBytes.bytes.length;
+
+      onProgress(
+          const EfficientDownloadProgress(message: 'Seeding core pack…'));
+      seed = await seedAndRecord(projectId: projectId, result: coreBytes);
+      seed ??= const SeedResult(
+        forms: 0,
+        layers: 0,
+        choiceLists: 0,
+        assignments: 0,
+        referenceFeatures: 0,
+      );
+      // Core reseed wipes refs — clear stored layer hashes.
+      await _saveLayerHashes(projectId, {});
+      localLayerHashes.clear();
+    }
 
     final seeder = _seeder;
     if (seeder == null) {
@@ -164,10 +210,25 @@ class BundleDownloader {
 
     final layerIds = await seeder.workingSetLayerIds(projectId);
     debugPrint('[BUNDLE] working set layers=${layerIds.length}');
+    final updatedLayerHashes = Map<String, String>.from(localLayerHashes);
 
     for (var i = 0; i < layerIds.length; i++) {
       final layerId = layerIds[i];
       final index = i + 1;
+      final remoteHash = manifest?.layerHashes[layerId];
+      final localHash = localLayerHashes[layerId];
+      if (remoteHash != null &&
+          remoteHash.isNotEmpty &&
+          localHash == remoteHash) {
+        debugPrint('[BUNDLE] layer $layerId unchanged — skipping');
+        onProgress(EfficientDownloadProgress(
+          message: 'Map data up to date ($index/${layerIds.length})…',
+          layerIndex: index,
+          layerTotal: layerIds.length,
+        ));
+        continue;
+      }
+
       onProgress(EfficientDownloadProgress(
         message: 'Requesting map data ($index/${layerIds.length})…',
         layerIndex: index,
@@ -216,6 +277,10 @@ class BundleDownloader {
           referenceTiles: merged.referenceTiles,
           warnings: merged.warnings,
         );
+        final hash = layerBytes.contentHash ?? remoteHash;
+        if (hash != null && hash.isNotEmpty) {
+          updatedLayerHashes[layerId] = hash;
+        }
       } catch (e) {
         debugPrint('[BUNDLE] layer pack failed layer=$layerId: $e');
         seed = seed!.mergeRefs(
@@ -226,11 +291,50 @@ class BundleDownloader {
       }
     }
 
+    await _saveLayerHashes(projectId, updatedLayerHashes);
+
     return (
       ready: coreReady,
       seedResult: seed,
       downloadedBytes: totalBytes,
     );
+  }
+
+  Future<String?> _localCoreHash(String projectId) async {
+    final database = _db;
+    if (database == null) return null;
+    final row = await (database.select(database.projects)
+          ..where((p) => p.id.equals(projectId)))
+        .getSingleOrNull();
+    final hash = row?.contentHash;
+    if (hash == null || hash.isEmpty) return null;
+    return hash;
+  }
+
+  static String _layerHashKey(String projectId) =>
+      'fc_layer_pack_hashes_$projectId';
+
+  Future<Map<String, String>> _loadLayerHashes(String projectId) async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_layerHashKey(projectId));
+    if (raw == null || raw.isEmpty) return {};
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map) return {};
+      return decoded.map(
+        (k, v) => MapEntry(k.toString(), v.toString()),
+      );
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> _saveLayerHashes(
+    String projectId,
+    Map<String, String> hashes,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_layerHashKey(projectId), jsonEncode(hashes));
   }
 
   Future<BundleReady> _awaitReady({

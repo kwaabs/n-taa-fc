@@ -342,6 +342,7 @@ func main() {
 				})
 				r.With(middleware.RequireRole(accessService, "admin")).
 					Post("/packs/warm", bundleHandler.WarmPacks)
+				r.Get("/packs/manifest", bundleHandler.GetPacksManifest)
 
 				// Reconciliation
 				// Reconciliation — supervisor+ only (writes to source DB)
