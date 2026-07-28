@@ -6,7 +6,7 @@ import { AreaDrawer } from "@/components/assignments/AreaDrawer";
 import { BasemapPicker } from "./BasemapPicker";
 import {
   X, ArrowRight, ArrowLeft, Check, Pentagon, FileText, Layers as LayersIcon,
-  Globe, Users2, ListChecks, Sparkles,
+  Globe, Users2, ListChecks, Sparkles, Table2,
 } from "lucide-react";
 
 interface Props {
@@ -14,20 +14,15 @@ interface Props {
 }
 
 interface WizardState {
-  // Step 1
   name: string;
   description: string;
-  // Step 2
   areaGeoJson: any | null;
-  // Step 3
   basemapId: string;
   basemapCustomUrl: string;
-  // Step 4
   firstLayerName: string;
   firstLayerGeomType: "point" | "line" | "polygon";
   firstLayerEditable: boolean;
   skipFirstLayer: boolean;
-  // Step 5 (form for layer)
   buildFormLater: boolean;
 }
 
@@ -44,12 +39,15 @@ const initialState: WizardState = {
   buildFormLater: true,
 };
 
+// Area comes after First Layer / Form so AOI-from-table (districts) can use a
+// linked polygon layer after create. In-wizard table pick needs a project id,
+// so Settings → Select from table is the path for that.
 const steps = [
   { id: 1, title: "Basics", icon: Sparkles },
-  { id: 2, title: "Area", icon: Pentagon },
-  { id: 3, title: "Basemap", icon: Globe },
-  { id: 4, title: "First Layer", icon: LayersIcon },
-  { id: 5, title: "Form", icon: FileText },
+  { id: 2, title: "Basemap", icon: Globe },
+  { id: 3, title: "First Layer", icon: LayersIcon },
+  { id: 4, title: "Form", icon: FileText },
+  { id: 5, title: "Area", icon: Pentagon },
   { id: 6, title: "Teams", icon: Users2 },
   { id: 7, title: "Review", icon: ListChecks },
 ];
@@ -66,7 +64,6 @@ export function MapProjectWizard({ onClose }: Props) {
 
   const createMutation = useMutation({
     mutationFn: async () => {
-      // Step 1: create project
       const config: any = {
         basemap_id: state.basemapId,
       };
@@ -78,10 +75,9 @@ export function MapProjectWizard({ onClose }: Props) {
         description: state.description,
         mode: "map_based",
         config,
+        area_of_interest: state.areaGeoJson || undefined,
       });
 
-      // Optionally save AOI (we'd PATCH /projects/:id with area_of_interest field — for now, skip; deferred)
-      // Step 2: create first layer (if not skipped)
       if (!state.skipFirstLayer && state.firstLayerName) {
         await api.createLayer(project.id, {
           name: state.firstLayerName,
@@ -103,17 +99,23 @@ export function MapProjectWizard({ onClose }: Props) {
 
   const canProceed = () => {
     switch (step) {
-      case 1: return state.name.trim().length > 0;
-      case 2: return true; // optional
-      case 3:
+      case 1:
+        return state.name.trim().length > 0;
+      case 2:
         if (state.basemapId === "custom") return state.basemapCustomUrl.includes("{z}");
         return !!state.basemapId;
-      case 4:
+      case 3:
         return state.skipFirstLayer || state.firstLayerName.trim().length > 0;
-      case 5: return true;
-      case 6: return true;
-      case 7: return true;
-      default: return false;
+      case 4:
+        return true;
+      case 5:
+        return true; // area optional
+      case 6:
+        return true;
+      case 7:
+        return true;
+      default:
+        return false;
     }
   };
 
@@ -123,18 +125,18 @@ export function MapProjectWizard({ onClose }: Props) {
     <>
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
         <div className="bg-white rounded-xl shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col">
-          {/* Header */}
           <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0">
             <div>
               <h2 className="text-lg font-semibold text-gray-900">New Map-Based Project</h2>
-              <p className="text-xs text-gray-500 mt-0.5">Step {step} of {steps.length} — {steps[step - 1].title}</p>
+              <p className="text-xs text-gray-500 mt-0.5">
+                Step {step} of {steps.length} — {steps[step - 1].title}
+              </p>
             </div>
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
               <X className="h-5 w-5" />
             </button>
           </div>
 
-          {/* Progress stepper */}
           <div className="flex items-center px-6 py-3 border-b border-gray-100 shrink-0 overflow-x-auto">
             {steps.map((s, idx) => {
               const isActive = step === s.id;
@@ -146,53 +148,45 @@ export function MapProjectWizard({ onClose }: Props) {
                       isActive
                         ? "bg-blue-600 text-white"
                         : isDone
-                        ? "bg-green-500 text-white"
-                        : "bg-gray-200 text-gray-500"
+                          ? "bg-green-500 text-white"
+                          : "bg-gray-200 text-gray-500"
                     }`}
                   >
                     {isDone ? <Check className="h-3.5 w-3.5" /> : s.id}
                   </div>
-                  <span className={`ml-1.5 text-xs ${isActive ? "font-medium text-gray-900" : "text-gray-500"}`}>
+                  <span
+                    className={`ml-1.5 text-xs ${
+                      isActive ? "font-medium text-gray-900" : "text-gray-500"
+                    }`}
+                  >
                     {s.title}
                   </span>
                   {idx < steps.length - 1 && (
-                    <div className={`mx-2 w-6 h-0.5 ${isDone ? "bg-green-500" : "bg-gray-200"}`} />
+                    <div
+                      className={`mx-2 w-6 h-0.5 ${isDone ? "bg-green-500" : "bg-gray-200"}`}
+                    />
                   )}
                 </div>
               );
             })}
           </div>
 
-          {/* Body */}
           <div className="flex-1 overflow-y-auto p-6">
-            {step === 1 && (
-              <StepBasics state={state} update={update} />
-            )}
-            {step === 2 && (
+            {step === 1 && <StepBasics state={state} update={update} />}
+            {step === 2 && <StepBasemap state={state} update={update} />}
+            {step === 3 && <StepFirstLayer state={state} update={update} />}
+            {step === 4 && <StepForm state={state} update={update} />}
+            {step === 5 && (
               <StepArea
                 state={state}
                 update={update}
                 openDrawer={() => setShowAreaDrawer(true)}
               />
             )}
-            {step === 3 && (
-              <StepBasemap state={state} update={update} />
-            )}
-            {step === 4 && (
-              <StepFirstLayer state={state} update={update} />
-            )}
-            {step === 5 && (
-              <StepForm state={state} update={update} />
-            )}
-            {step === 6 && (
-              <StepTeams state={state} update={update} teams={teamList} />
-            )}
-            {step === 7 && (
-              <StepReview state={state} />
-            )}
+            {step === 6 && <StepTeams state={state} update={update} teams={teamList} />}
+            {step === 7 && <StepReview state={state} />}
           </div>
 
-          {/* Footer */}
           <div className="flex items-center justify-between px-6 py-4 border-t border-gray-200 shrink-0">
             <button
               onClick={() => step > 1 && setStep(step - 1)}
@@ -247,8 +241,6 @@ export function MapProjectWizard({ onClose }: Props) {
   );
 }
 
-// ── Step components ─────────────────────────────────────
-
 function StepBasics({ state, update }: any) {
   return (
     <div className="flex flex-col gap-4">
@@ -285,24 +277,40 @@ function StepArea({ state, update, openDrawer }: any) {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-gray-600">
-        Define the project's geographic area. This sets the default map extent and the boundary
-        for assignment areas. <span className="text-gray-400">Optional — you can add this later.</span>
+        Define the project's geographic area (default map extent and assignment
+        boundary).{" "}
+        <span className="text-gray-400">Optional — you can skip and set it later.</span>
       </p>
-      <button
-        onClick={openDrawer}
-        className={`w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-8 text-sm transition-colors ${
-          state.areaGeoJson
-            ? "border-green-300 bg-green-50 text-green-700"
-            : "border-gray-300 text-gray-600 hover:border-blue-300 hover:bg-blue-50"
-        }`}
-      >
-        <Pentagon className="h-5 w-5" />
-        {state.areaGeoJson ? "Area defined — click to edit" : "Draw Project Area on Map"}
-      </button>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <button
+          type="button"
+          onClick={openDrawer}
+          className={`flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-8 text-sm transition-colors ${
+            state.areaGeoJson
+              ? "border-green-300 bg-green-50 text-green-700"
+              : "border-gray-300 text-gray-600 hover:border-blue-300 hover:bg-blue-50"
+          }`}
+        >
+          <Pentagon className="h-5 w-5" />
+          {state.areaGeoJson ? "Area defined — edit drawing" : "Draw on map"}
+        </button>
+
+        <div className="flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-center">
+          <Table2 className="h-5 w-5 text-gray-400" />
+          <p className="text-sm font-medium text-gray-700">Select from table</p>
+          <p className="text-xs text-gray-500 max-w-xs">
+            After you create the project and link a polygon layer (e.g. districts),
+            use <strong>Settings → Project Area → Select from table</strong>.
+          </p>
+        </div>
+      </div>
+
       {state.areaGeoJson && (
         <button
+          type="button"
           onClick={() => update({ areaGeoJson: null })}
-          className="text-xs text-red-500 hover:underline"
+          className="text-xs text-red-500 hover:underline self-start"
         >
           Clear area
         </button>
@@ -336,7 +344,8 @@ function StepFirstLayer({ state, update }: any) {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-gray-600">
-        Add the first layer to your project. <span className="text-gray-400">You can add more layers later.</span>
+        Add the first layer to your project.{" "}
+        <span className="text-gray-400">You can add more layers later.</span>
       </p>
 
       <label className="flex items-center gap-2 text-sm">
@@ -367,6 +376,7 @@ function StepFirstLayer({ state, update }: any) {
               {["point", "line", "polygon"].map((g) => (
                 <button
                   key={g}
+                  type="button"
                   onClick={() => update({ firstLayerGeomType: g })}
                   className={`rounded-lg border px-3 py-2 text-sm capitalize ${
                     state.firstLayerGeomType === g
@@ -434,7 +444,7 @@ function StepForm({ state, update }: any) {
   );
 }
 
-function StepTeams({ state, teams }: any) {
+function StepTeams({ teams }: any) {
   return (
     <div className="flex flex-col gap-4">
       <p className="text-sm text-gray-600">
@@ -442,7 +452,7 @@ function StepTeams({ state, teams }: any) {
         <strong>{teams.length}</strong> teams in your organization.
       </p>
       <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs text-blue-700">
-        💡 After creating the project, go to the <strong>Access</strong> tab to assign teams
+        After creating the project, go to the <strong>Access</strong> tab to assign teams
         with the right roles.
       </div>
     </div>
@@ -457,17 +467,17 @@ function StepReview({ state }: any) {
         <Row label="Name" value={state.name} />
         {state.description && <Row label="Description" value={state.description} />}
         <Row label="Mode" value="Map-based" />
-        <Row label="Project area" value={state.areaGeoJson ? "Defined" : "Not set"} />
         <Row label="Basemap" value={state.basemapId === "custom" ? "Custom URL" : state.basemapId} />
         {!state.skipFirstLayer && state.firstLayerName ? (
           <Row label="First layer" value={`${state.firstLayerName} (${state.firstLayerGeomType})`} />
         ) : (
           <Row label="First layer" value="None yet" />
         )}
+        <Row label="Project area" value={state.areaGeoJson ? "Defined (drawn)" : "Not set"} />
       </div>
       <p className="text-xs text-gray-500 italic">
-        After creation you'll land on the project overview. You can then:
-        add more layers, build forms, assign teams, and dispatch the project.
+        To set AOI from districts: after create, link a polygon layer, then Settings →
+        Project Area → Select from table.
       </p>
     </div>
   );

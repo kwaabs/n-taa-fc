@@ -25,6 +25,10 @@ class Projects extends Table {
   DateTimeColumn get downloadedAt => dateTime().nullable()();
   /// GeoJSON geometry string for the project Area of Interest (Polygon).
   TextColumn get areaOfInterest => text().nullable()();
+
+  /// Layer id used to build AOI (from project.config.aoi_layer_id). Field edits locked.
+  TextColumn get aoiLayerId => text().nullable()();
+
   DateTimeColumn get createdAt => dateTime().withDefault(currentDateAndTime)();
   DateTimeColumn get updatedAt => dateTime().withDefault(currentDateAndTime)();
 
@@ -59,6 +63,10 @@ class Layers extends Table {
   /// If this layer was imported from an external data source, this is its id.
   /// Used by D-phase to know where edits / deletes should be pushed back to.
   TextColumn get dataSourceId => text().nullable()();
+
+  /// Mirrors server `layers.is_editable`. AOI source layers are false.
+  BoolColumn get isEditable =>
+      boolean().withDefault(const Constant(true))();
 
   DateTimeColumn get downloadedAt =>
       dateTime().withDefault(currentDateAndTime)();
@@ -257,7 +265,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forUser(String userId) : super(_openConnection(userId));
 
   @override
-  int get schemaVersion => 7;
+  int get schemaVersion => 8;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -306,6 +314,11 @@ class AppDatabase extends _$AppDatabase {
           // v6 → v7: assignment layerId for reference-pack working set
           if (from < 7) {
             await _safeAddColumn(m, assignments, assignments.layerId);
+          }
+          // v7 → v8: AOI source layer lock (project.aoi_layer_id + layer.is_editable)
+          if (from < 8) {
+            await _safeAddColumn(m, layers, layers.isEditable);
+            await _safeAddColumn(m, projects, projects.aoiLayerId);
           }
         },
       );

@@ -67,11 +67,11 @@ export function LayerChangeSummary({ projectId, layerId, layer }: Props) {
           <div>
             <p className="text-sm font-medium text-blue-900">Linked table</p>
             <p className="text-xs text-blue-700 mt-0.5">
-              Reference features are read live from{" "}
-              <strong className="font-mono">{table}</strong> (not copied). Field
-              collections synced from mobile are stored separately in Field
-              Collector — see the <strong>Collected</strong> card and the Features
-              tab.
+              <strong>Live source</strong> rows are read from{" "}
+              <strong className="font-mono">{table}</strong> (not copied).{" "}
+              <strong>Field changes (FC)</strong> from mobile land in Field
+              Collector until you Reconcile them back to the source — see Overview
+              counts and the Features tab.
             </p>
           </div>
         </div>
@@ -98,14 +98,14 @@ export function LayerChangeSummary({ projectId, layerId, layer }: Props) {
                 <Plus className="h-4 w-4 text-green-600" />
               </div>
               <span className="text-xs font-medium text-gray-600">
-                Collected
+                Field changes (FC)
               </span>
             </div>
             <p className="text-2xl font-bold text-gray-900">
               {isLoading ? "…" : collectedCount.toLocaleString()}
             </p>
             <p className="text-xs text-gray-400 mt-0.5">
-              Synced from mobile
+              Synced from mobile — reconcile to write back
               {!isLoading && (insertedCount > 0 || updatedCount > 0)
                 ? ` · ${insertedCount} new · ${updatedCount} updated`
                 : ""}

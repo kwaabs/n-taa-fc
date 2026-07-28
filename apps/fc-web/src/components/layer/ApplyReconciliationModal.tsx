@@ -40,14 +40,34 @@ export function ApplyReconciliationModal({
   const pollRef = useRef<number | null>(null);
   const [showLog, setShowLog] = useState(false);
 
+  const [acks, setAcks] = useState<Record<string, boolean>>(() => {
+    const next: Record<string, boolean> = {};
+    for (const key of preview?.required_acknowledgments ?? []) next[key] = false;
+    return next;
+  });
+
   const safeCount = preview?.summary?.safe_to_apply ?? 0;
   const conflictCount = preview?.summary?.conflicts ?? 0;
   const schema = dataSource?.config?.schema ?? "—";
   const table = dataSource?.config?.table ?? "—";
+  const requiredAcks: string[] = preview?.required_acknowledgments ?? [];
+  const applyBlocked = !!preview?.apply_blocked;
+  const allAcksChecked =
+    requiredAcks.length === 0 || requiredAcks.every((k) => acks[k]);
+  const canApply = safeCount > 0 && !applyBlocked && allAcksChecked;
 
   const applyMutation = useMutation({
     mutationFn: async () => {
-      return api.applyReconciliation(projectId, layerId, dataSource.id);
+      return api.applyReconciliation(
+        projectId,
+        layerId,
+        dataSource.id,
+        undefined,
+        undefined,
+        Object.entries(acks)
+          .filter(([, v]) => v)
+          .map(([k]) => k),
+      );
     },
     onSuccess: (resp: any) => {
       // Backend returns { job_id, status, ... }
@@ -384,7 +404,7 @@ export function ApplyReconciliationModal({
                 </button>
                 <button
                   onClick={() => applyMutation.mutate()}
-                  disabled={applyMutation.isPending || safeCount === 0}
+                  disabled={applyMutation.isPending || !canApply}
                   className="flex-1 flex items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <PlayCircle className="h-4 w-4" />

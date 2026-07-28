@@ -37,7 +37,7 @@ help:
 	@echo   geo-bootstrap / geo-migrate / env-files / setup
 	@echo   fc-api / geo-api / fc-web / geo-web
 	@echo   fc-api-up / fc-api-down   (replicas behind Caddy :5355)
-	@echo   mobile-run / adb-reverse / adb-reverse-status / adb-reverse-clear
+	@echo   mobile-run / mobile-release / sync-symbols / adb-reverse
 	@echo   smoke / psql / geo-seed-layers
 
 .PHONY: infra-up infra-down infra-clean infra-restart infra-logs infra-ps
@@ -116,7 +116,7 @@ setup: env-files
 	$(PWSH) "$(COMPOSE_PS1)" -ComposeFile "$(INFRA_DIR)/docker-compose.yml" -ProjectDir "$(INFRA_DIR)" -EnvFile "$(COMPOSE_ENV)" -Args "restart martin"
 	@echo Setup complete.
 
-.PHONY: fc-api geo-api fc-web geo-web mobile-run adb-reverse adb-reverse-status adb-reverse-clear tidy-fc tidy-geo fc-api-up fc-api-down
+.PHONY: fc-api geo-api fc-web geo-web mobile-run mobile-release adb-reverse adb-reverse-status adb-reverse-clear tidy-fc tidy-geo fc-api-up fc-api-down
 
 fc-api:
 	cd /d "$(subst /,\,$(FC_API))" && go run ./cmd/server/main.go
@@ -143,6 +143,11 @@ geo-web:
 mobile-run: adb-reverse
 	cd /d "$(subst /,\,$(MOBILE))" && flutter pub get && flutter devices && flutter run
 
+# Build signed release APK and upload to RustFS public/releases/android/.
+# Bump mobile/pubspec.yaml version first. Flags: -Force -SkipBuild -DryRun
+mobile-release:
+	$(PWSH) "$(ROOT)/scripts/mobile-release.ps1"
+
 adb-reverse:
 	adb reverse tcp:5352 tcp:5352
 	adb reverse tcp:5353 tcp:5353
@@ -166,6 +171,13 @@ tidy-fc:
 
 tidy-geo:
 	cd /d "$(subst /,\,$(GEO_API))" && go mod tidy
+
+.PHONY: sync-symbols
+sync-symbols:
+	@if not exist shared\map-symbols mkdir shared\map-symbols
+	@if not exist services\fc-api\internal\geostyle\symbols mkdir services\fc-api\internal\geostyle\symbols
+	$(PS) -Command "Copy-Item -Force 'shared\map-symbols\*.svg' 'services\fc-api\internal\geostyle\symbols\'"
+	@echo Synced shared/map-symbols -> fc-api geostyle embed
 
 .PHONY: smoke
 smoke:

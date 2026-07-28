@@ -27,6 +27,7 @@ import (
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/config"
+	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/geostyle"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/handler"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/middleware"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/repository"
@@ -91,7 +92,7 @@ func main() {
 	// ── Services ──────────────────────────────────────
 	validationService := service.NewValidationService(formRepo)
 	accessService := service.NewAccessService(db)
-	projectService := service.NewProjectService(db, projectRepo, memberRepo, accessService)
+	projectService := service.NewProjectService(db, projectRepo, memberRepo, layerRepo, accessService)
 	memberService := service.NewMemberService(memberRepo, userRepo, projectRepo)
 	formService := service.NewFormService(db, formRepo, memberRepo, validationService, accessService)
 	layerService := service.NewLayerService(
@@ -127,7 +128,7 @@ func main() {
 		dataSourceRepo, featureRepo, layerRepo, memberRepo, connectionRepo, projectRepo,
 		cfg.JWTSecret, cfg.S3Endpoint, cfg.S3Bucket, cfg.S3AccessKey, cfg.S3SecretKey,
 	)
-	styleService := service.NewStyleService(layerRepo, memberRepo)
+	styleService := service.NewStyleService(db, layerRepo, memberRepo)
 	discoveryService := service.NewDiscoveryService(connectionRepo, cfg.JWTSecret)
 	importOrchestrator := service.NewImportOrchestrator(
 		db, importJobRepo, connectionRepo, layerRepo, formRepo, dataSourceRepo, featureRepo,
@@ -158,7 +159,7 @@ func main() {
 	}
 	sourceConnOpener := service.NewSourceConnectionOpener(connectionRepo, cfg.JWTSecret, homeDB)
 	reconciliationService := service.NewReconciliationService(
-		featureRepo, dataSourceRepo, layerRepo, memberRepo,
+		featureRepo, dataSourceRepo, layerRepo, memberRepo, projectRepo,
 		reconciliationRepo, sourceConnOpener,
 	)
 	reconciliationPool := service.NewReconciliationWorkerPool(reconciliationService, reconciliationRepo, 1)
@@ -220,6 +221,11 @@ func main() {
 	)
 	attachmentHandler := handler.NewAttachmentHandler(attachmentService)
 	bundleHandler := handler.NewBundleHandler(bundleSvc)
+	appReleaseHandler, err := handler.NewAppReleaseHandler(cfg)
+	if err != nil {
+		slog.Error("failed to init app release handler", "error", err)
+		os.Exit(1)
+	}
 
 	// ── Router ────────────────────────────────────────
 	r := chi.NewRouter()
@@ -237,6 +243,21 @@ func main() {
 	}))
 
 	r.Get("/health", healthHandler.Check)
+	r.Get("/api/v1/app/android/latest", appReleaseHandler.LatestAndroid)
+	r.Get("/api/v1/app/symbols", func(w http.ResponseWriter, r *http.Request) {
+		names := geostyle.SymbolNames()
+		type item struct {
+			Name string `json:"name"`
+			Ref  string `json:"ref"`
+			SVG  string `json:"svg"`
+		}
+		out := make([]item, 0, len(names))
+		for _, n := range names {
+			svg, _ := geostyle.SymbolSVG(n)
+			out = append(out, item{Name: n, Ref: "geo:" + n, SVG: svg})
+		}
+		handler.RespondJSON(w, http.StatusOK, out)
+	})
 
 	// Proxy /gotrue/* to GoTrue, stripping its CORS headers so our middleware controls them
 	gotrueURL, err := url.Parse(cfg.GoTrueURL)
@@ -330,6 +351,8 @@ func main() {
 				r.Post("/icons", iconHandler.UploadIcon)
 				r.With(middleware.RequireRole(accessService, "admin")).
 					Post("/dispatch", projectHandler.Dispatch)
+				r.With(middleware.RequireRole(accessService, "admin")).
+					Post("/aoi/from-layer", projectHandler.BuildAOIFromLayer)
 
 				// Bundle (full pack) + efficient-sync slim core pack
 				r.Route("/bundle", func(r chi.Router) {

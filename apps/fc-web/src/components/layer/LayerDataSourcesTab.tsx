@@ -95,7 +95,7 @@ export function LayerDataSourcesTab({ projectId, layerId, layer }: Props) {
           <h2 className="text-lg font-semibold text-gray-900">Data Sources</h2>
           <p className="text-sm text-gray-500 mt-0.5">
             {isLinkedLayer
-              ? "This layer reads a live database table. Link a connection profile for write-back credentials when needed."
+              ? "This layer reads a live database table. Reconcile pushes pending field edits back to the source — preview will list write-back precautions (EVW names, hard deletes, skipped fields) that must be acknowledged."
               : "Import reference data from files, URLs, or databases"}
           </p>
         </div>

@@ -18,6 +18,7 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/uptrace/bun"
 
+	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/geostyle"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/lib/cache"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/model"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/repository"
@@ -535,6 +536,7 @@ func (p *BundleWorkerPool) writeLayers(
 				fmt.Sprintf("Layer %q references unpublished form; form_id set to null in bundle", l.Name))
 			l.FormID = nil
 		}
+		_ = geostyle.ApplyResolvedStyleJSON(ctx, p.db, &l)
 		published = append(published, l)
 	}
 	if len(published) == 0 {
@@ -564,6 +566,7 @@ func (p *BundleWorkerPool) writeLayers(
 			"form_id":        l.FormID,
 			"source_type":    l.SourceType,
 			"data_source_id": dsID,
+			"is_editable":    l.IsEditable,
 		})
 
 		// Inject data_source_id into the per-layer JSON without modifying

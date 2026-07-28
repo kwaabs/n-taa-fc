@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useParams, Link } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { useParams, Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { LayerDataSourcesTab } from "@/components/layer/LayerDataSourcesTab";
@@ -26,9 +26,30 @@ const tabs = [
   { id: "settings", label: "Style",       icon: Cog },
 ];
 
+const TAB_IDS = new Set(tabs.map((t) => t.id));
+
 export function LayerDetailPage() {
   const { projectId, layerId } = useParams();
-  const [activeTab, setActiveTab] = useState("overview");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tabFromUrl = searchParams.get("tab");
+  const [activeTab, setActiveTab] = useState(
+    tabFromUrl && TAB_IDS.has(tabFromUrl) ? tabFromUrl : "overview",
+  );
+
+  useEffect(() => {
+    const t = searchParams.get("tab");
+    if (t && TAB_IDS.has(t) && t !== activeTab) {
+      setActiveTab(t);
+    }
+  }, [searchParams, activeTab]);
+
+  const selectTab = (id: string) => {
+    setActiveTab(id);
+    const next = new URLSearchParams(searchParams);
+    if (id === "overview") next.delete("tab");
+    else next.set("tab", id);
+    setSearchParams(next, { replace: true });
+  };
 
   const { data: layer } = useQuery({
     queryKey: ["layer", layerId],
@@ -84,7 +105,7 @@ export function LayerDetailPage() {
         {tabs.map((tab) => (
           <button
             key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
+            onClick={() => selectTab(tab.id)}
             className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
               activeTab === tab.id
                 ? "border-blue-600 text-blue-600"

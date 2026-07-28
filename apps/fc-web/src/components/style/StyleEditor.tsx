@@ -30,6 +30,9 @@ export function StyleEditor({ projectId, layerId }: Props) {
     queryFn: () => api.getLayer(projectId, layerId),
   });
   const geometryType: string = layer?.geometry_type ?? layer?.data?.geometry_type ?? "";
+  const sourceType: string =
+    layer?.source_type ?? layer?.data?.source_type ?? "";
+  const isGeoLinked = sourceType === "linked_table";
 
   useEffect(() => {
     if (serverStyle) setStyle(serverStyle);
@@ -39,10 +42,16 @@ export function StyleEditor({ projectId, layerId }: Props) {
     mutationFn: () => api.updateLayerStyle(projectId, layerId, style),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["layerStyle", layerId] });
+      queryClient.invalidateQueries({ queryKey: ["layer", layerId] });
+      queryClient.invalidateQueries({ queryKey: ["layers", projectId] });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     },
   });
+
+  useEffect(() => {
+    if (isGeoLinked && tab !== "default") setTab("default");
+  }, [isGeoLinked, tab]);
 
   if (isLoading || !style) {
     return <p className="text-gray-500 p-4">Loading style…</p>;
@@ -115,10 +124,18 @@ export function StyleEditor({ projectId, layerId }: Props) {
   const handleIconSelected = (iconRef: string) => {
     if (!showIconPicker) return;
     if (showIconPicker.target === "default") {
-      updateDefault("icon", iconRef);
+      setStyle({
+        ...style!,
+        default: {
+          ...style!.default,
+          icon: iconRef,
+          // Shared geo symbols: let API re-embed SVG from the pack on save/reload
+          ...(iconRef.startsWith("geo:") ? { icon_svg: undefined } : {}),
+        },
+      });
     } else {
       const idx = parseInt(showIconPicker.target);
-      const rule = style.rules![idx];
+      const rule = style!.rules![idx];
       updateRule(idx, { ...rule, style: { ...rule.style, icon: iconRef } });
     }
     setShowIconPicker(null);
@@ -142,7 +159,14 @@ export function StyleEditor({ projectId, layerId }: Props) {
       <div className="bg-white rounded-xl border border-gray-200 flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3 border-b border-gray-200">
-          <h3 className="font-semibold text-gray-900">Style Editor</h3>
+          <div className="flex flex-col gap-0.5">
+            <h3 className="font-semibold text-gray-900">Style Editor</h3>
+            {isGeoLinked && (
+              <p className="text-xs text-blue-700">
+                Shared symbology — saves to geo and Field Collector maps
+              </p>
+            )}
+          </div>
           <div className="flex items-center gap-2">
             {saved && <span className="text-xs text-green-600">Saved!</span>}
             <button
@@ -157,16 +181,16 @@ export function StyleEditor({ projectId, layerId }: Props) {
               className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-sm text-white hover:bg-blue-700 disabled:opacity-50"
             >
               <Save className="h-3.5 w-3.5" />
-              {saveMutation.isPending ? "Saving…" : "Save Style"}
+              {saveMutation.isPending ? "Saving…" : "Save"}
             </button>
           </div>
         </div>
 
-        {/* Tabs */}
+        {/* Tabs — linked dbo layers only use Default (shared with geo) */}
         <div className="flex gap-1 border-b border-gray-200 px-5">
           {tabBtn("default", "Default", Palette)}
-          {tabBtn("rules", `Rules (${style.rules?.length || 0})`, ListChecks)}
-          {tabBtn("label", "Label & Visibility", Type)}
+          {!isGeoLinked && tabBtn("rules", `Rules (${style.rules?.length || 0})`, ListChecks)}
+          {!isGeoLinked && tabBtn("label", "Label & Visibility", Type)}
         </div>
 
         {/* Tab bodies */}
@@ -175,12 +199,13 @@ export function StyleEditor({ projectId, layerId }: Props) {
             <DefaultStyleForm
               style={style.default}
               geometryType={geometryType}
+              sharedSymbols={isGeoLinked}
               onChange={updateDefault}
               onPickIcon={() => setShowIconPicker({ target: "default" })}
             />
           )}
 
-          {tab === "rules" && (
+          {!isGeoLinked && tab === "rules" && (
             <RulesList
               rules={style.rules || []}
               defaultStyle={style.default}
@@ -188,11 +213,11 @@ export function StyleEditor({ projectId, layerId }: Props) {
               onUpdate={updateRule}
               onRemove={removeRule}
               onMove={moveRule}
-              onPickIcon={(idx) => setShowIconPicker({ target: String(idx) })}
+              onPickIcon={(idx: number) => setShowIconPicker({ target: String(idx) })}
             />
           )}
 
-          {tab === "label" && (
+          {!isGeoLinked && tab === "label" && (
             <LabelVisibilityForm
               label={style.label}
               visibility={style.visibility}
@@ -211,7 +236,7 @@ export function StyleEditor({ projectId, layerId }: Props) {
 
       {/* Preview pane */}
       <div className="lg:sticky lg:top-4 lg:self-start">
-        <StylePreview style={style} />
+        <StylePreview style={style} geometryType={geometryType} />
       </div>
 
       {showIconPicker && (
@@ -222,6 +247,7 @@ export function StyleEditor({ projectId, layerId }: Props) {
               ? style.default.icon
               : style.rules?.[parseInt(showIconPicker.target)]?.style?.icon
           }
+          sharedSymbolsOnly={isGeoLinked}
           onSelect={handleIconSelected}
           onClose={() => setShowIconPicker(null)}
         />
@@ -235,11 +261,13 @@ export function StyleEditor({ projectId, layerId }: Props) {
 function DefaultStyleForm({
   style,
   geometryType,
+  sharedSymbols = false,
   onChange,
   onPickIcon,
 }: {
   style: any;
   geometryType: string;
+  sharedSymbols?: boolean;
   onChange: (key: string, value: any) => void;
   onPickIcon: () => void;
 }) {
@@ -251,16 +279,48 @@ function DefaultStyleForm({
     const result = validateAndSanitizeSvg(raw);
     if (!result.valid) {
       setSvgError(result.error || "Invalid SVG");
-      onChange("icon_svg", raw); // keep raw so the user can fix it
+      onChange("icon_svg", raw);
     } else {
       setSvgError(null);
       onChange("icon_svg", result.sanitized || "");
     }
   };
 
+  const iconLabel = style.icon?.startsWith("geo:")
+    ? style.icon.replace(/^geo:/, "")
+    : style.icon || "Choose icon…";
+
   return (
     <div className="grid grid-cols-2 gap-4">
-            {isPoint && (
+      {isPoint && (
+        <div className="col-span-2">
+          <Field label={sharedSymbols ? "Map symbol" : "Icon"}>
+            <button
+              type="button"
+              onClick={onPickIcon}
+              className="w-full flex items-center justify-between rounded border border-gray-300 px-3 py-2 text-sm hover:bg-gray-50"
+            >
+              <span className="flex items-center gap-2 min-w-0">
+                {style.icon_svg ? (
+                  <span
+                    className="h-6 w-6 shrink-0"
+                    dangerouslySetInnerHTML={{
+                      __html: String(style.icon_svg).replace(
+                        /<svg/i,
+                        '<svg width="24" height="24"',
+                      ),
+                    }}
+                  />
+                ) : null}
+                <span className="truncate text-gray-800">{iconLabel}</span>
+              </span>
+              <span className="text-xs text-blue-600 shrink-0">Change</span>
+            </button>
+          </Field>
+        </div>
+      )}
+
+      {isPoint && !sharedSymbols && (
         <div className="col-span-2">
           <div className="flex items-center justify-between mb-1">
             <label className="block text-xs font-medium text-gray-600">
@@ -348,6 +408,15 @@ function DefaultStyleForm({
             <option value="dotted">Dotted · · · ·</option>
             <option value="dash_dot">Dash-dot ─·─·</option>
           </select>
+        </Field>
+      )}
+
+      {geometryType === "polygon" && (
+        <Field label="Outline color">
+          <ColorInput
+            value={style.stroke_color || style.color || "#3b82f6"}
+            onChange={(v) => onChange("stroke_color", v)}
+          />
         </Field>
       )}
     </div>

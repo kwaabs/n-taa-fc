@@ -1343,6 +1343,22 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     final layer = await (db.select(db.layers)
           ..where((l) => l.id.equals(layerId)))
         .getSingleOrNull();
+    final project = await (db.select(db.projects)
+          ..where((p) => p.id.equals(widget.project.id)))
+        .getSingleOrNull();
+    if (project?.aoiLayerId != null && project!.aoiLayerId == layerId) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            duration: Duration(seconds: 4),
+            content: Text(
+              'This layer is used as the project AOI and cannot be edited.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
     if (layer == null || layer.formId == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1537,6 +1553,22 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     final layer = await (database.select(database.layers)
           ..where((l) => l.id.equals(layerId)))
         .getSingleOrNull();
+    final project = await (database.select(database.projects)
+          ..where((p) => p.id.equals(widget.project.id)))
+        .getSingleOrNull();
+    if (project?.aoiLayerId != null && project!.aoiLayerId == layerId) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            duration: Duration(seconds: 4),
+            content: Text(
+              'This layer is used as the project AOI and cannot be modified.',
+            ),
+          ),
+        );
+      }
+      return;
+    }
     if (layer == null || layer.formId == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -3048,7 +3080,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
       debugPrint('[D0.2 DEBUG] tap props: source=$source, allProps=$props');
 
       if (!mounted) return;
-      _showFeatureSheet(
+      await _showFeatureSheet(
         layerId: layerId,
         featureId: featureId,
 
@@ -3087,13 +3119,13 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     );
   }
 
-  void _showFeatureSheet({
+  Future<void> _showFeatureSheet({
     required String? layerId,
     required String? featureId,
     required Map<String, dynamic> attributes,
     String? source, // 👈 NEW
     String? sourceRef, // 👈 NEW
-  }) {
+  }) async {
     final theme = Theme.of(context);
     final settingsAsync = ref.watch(settingsProvider);
     final basemapId = settingsAsync.value?.basemap ?? BasemapId.osm;
@@ -3102,6 +3134,22 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     final layerNames = layerNamesAsync.value ?? const <String, String>{};
     final layerName =
         layerId != null ? (layerNames[layerId] ?? 'Layer') : 'Feature';
+
+    // Linked layers may have is_editable=false on the server but still allow
+    // reference edits. Only the AOI source layer is fully locked.
+    var layerEditable = true;
+    if (layerId != null) {
+      final db = ref.read(appDatabaseProvider);
+      if (db != null) {
+        final project = await (db.select(db.projects)
+              ..where((p) => p.id.equals(widget.project.id)))
+            .getSingleOrNull();
+        if (project?.aoiLayerId != null && project!.aoiLayerId == layerId) {
+          layerEditable = false;
+        }
+      }
+    }
+    if (!mounted) return;
 
     // Best distinguishing attribute for a subtitle
     String? subtitle;
@@ -3254,9 +3302,11 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                           ),
                   ),
                   // ── D0.2/D0.3: Reference feature actions ──
+                  // Hidden for AOI / non-editable layers.
 
-                  if (source == 'reference' ||
-                      (source == 'collected' && sourceRef != null)) ...[
+                  if (layerEditable &&
+                      (source == 'reference' ||
+                          (source == 'collected' && sourceRef != null))) ...[
                     const SizedBox(height: 8),
                     const Divider(height: 1),
                     const SizedBox(height: 8),
@@ -3307,6 +3357,18 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                           ),
                         ),
                       ],
+                    ),
+                  ] else if (!layerEditable &&
+                      (source == 'reference' ||
+                          (source == 'collected' && sourceRef != null))) ...[
+                    const SizedBox(height: 8),
+                    const Divider(height: 1),
+                    const SizedBox(height: 8),
+                    Text(
+                      'This layer is the project AOI and cannot be edited in the field.',
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ],

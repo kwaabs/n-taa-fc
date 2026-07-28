@@ -639,10 +639,12 @@ class ApiClient {
         sourceId: string,
         batchSize?: number,
         featureIds?: string[],
+        acknowledgments?: string[],
     ) {
         const body: Record<string, unknown> = {};
         if (batchSize) body.batch_size = batchSize;
         if (featureIds?.length) body.feature_ids = featureIds;
+        if (acknowledgments?.length) body.acknowledgments = acknowledgments;
         return this.request<any>(
             `${API_BASE}/projects/${projectId}/layers/${layerId}/data-sources/${sourceId}/reconcile/apply`,
             {
@@ -728,6 +730,13 @@ class ApiClient {
             method: "PUT",
             body: JSON.stringify(style),
         });
+    }
+
+    /** Shared geo/FC map symbols (pole, transformer, …). */
+    listMapSymbols() {
+        return this.request<{ name: string; ref: string; svg: string }[]>(
+            `${API_BASE}/app/symbols`,
+        );
     }
 
     getFeature(projectId: string, featureId: string) {
@@ -839,6 +848,21 @@ class ApiClient {
             `${API_BASE}/projects/${projectId}/features?${query}`
         );
     }
+    buildAOIFromLayer(
+        projectId: string,
+        body: { layer_id: string; source_refs: string[] },
+    ) {
+        return this.request<{
+            geometry: any;
+            layer_id: string;
+            source_refs: string[];
+            row_count: number;
+        }>(`${API_BASE}/projects/${projectId}/aoi/from-layer`, {
+            method: "POST",
+            body: JSON.stringify(body),
+        });
+    }
+
     getLinkedLayerRows(
         projectId: string,
         layerId: string,

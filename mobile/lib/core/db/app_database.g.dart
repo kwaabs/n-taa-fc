@@ -72,6 +72,12 @@ class $ProjectsTable extends Projects with TableInfo<$ProjectsTable, Project> {
   late final GeneratedColumn<String> areaOfInterest = GeneratedColumn<String>(
       'area_of_interest', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _aoiLayerIdMeta =
+      const VerificationMeta('aoiLayerId');
+  @override
+  late final GeneratedColumn<String> aoiLayerId = GeneratedColumn<String>(
+      'aoi_layer_id', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
   static const VerificationMeta _createdAtMeta =
       const VerificationMeta('createdAt');
   @override
@@ -101,6 +107,7 @@ class $ProjectsTable extends Projects with TableInfo<$ProjectsTable, Project> {
         bundleSizeBytes,
         downloadedAt,
         areaOfInterest,
+        aoiLayerId,
         createdAt,
         updatedAt
       ];
@@ -177,6 +184,12 @@ class $ProjectsTable extends Projects with TableInfo<$ProjectsTable, Project> {
           areaOfInterest.isAcceptableOrUnknown(
               data['area_of_interest']!, _areaOfInterestMeta));
     }
+    if (data.containsKey('aoi_layer_id')) {
+      context.handle(
+          _aoiLayerIdMeta,
+          aoiLayerId.isAcceptableOrUnknown(
+              data['aoi_layer_id']!, _aoiLayerIdMeta));
+    }
     if (data.containsKey('created_at')) {
       context.handle(_createdAtMeta,
           createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta));
@@ -216,6 +229,8 @@ class $ProjectsTable extends Projects with TableInfo<$ProjectsTable, Project> {
           .read(DriftSqlType.dateTime, data['${effectivePrefix}downloaded_at']),
       areaOfInterest: attachedDatabase.typeMapping.read(
           DriftSqlType.string, data['${effectivePrefix}area_of_interest']),
+      aoiLayerId: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}aoi_layer_id']),
       createdAt: attachedDatabase.typeMapping
           .read(DriftSqlType.dateTime, data['${effectivePrefix}created_at'])!,
       updatedAt: attachedDatabase.typeMapping
@@ -243,6 +258,9 @@ class Project extends DataClass implements Insertable<Project> {
 
   /// GeoJSON geometry string for the project Area of Interest (Polygon).
   final String? areaOfInterest;
+
+  /// Layer id used to build AOI (from project.config.aoi_layer_id). Field edits locked.
+  final String? aoiLayerId;
   final DateTime createdAt;
   final DateTime updatedAt;
   const Project(
@@ -257,6 +275,7 @@ class Project extends DataClass implements Insertable<Project> {
       this.bundleSizeBytes,
       this.downloadedAt,
       this.areaOfInterest,
+      this.aoiLayerId,
       required this.createdAt,
       required this.updatedAt});
   @override
@@ -284,6 +303,9 @@ class Project extends DataClass implements Insertable<Project> {
     }
     if (!nullToAbsent || areaOfInterest != null) {
       map['area_of_interest'] = Variable<String>(areaOfInterest);
+    }
+    if (!nullToAbsent || aoiLayerId != null) {
+      map['aoi_layer_id'] = Variable<String>(aoiLayerId);
     }
     map['created_at'] = Variable<DateTime>(createdAt);
     map['updated_at'] = Variable<DateTime>(updatedAt);
@@ -315,6 +337,9 @@ class Project extends DataClass implements Insertable<Project> {
       areaOfInterest: areaOfInterest == null && nullToAbsent
           ? const Value.absent()
           : Value(areaOfInterest),
+      aoiLayerId: aoiLayerId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(aoiLayerId),
       createdAt: Value(createdAt),
       updatedAt: Value(updatedAt),
     );
@@ -335,6 +360,7 @@ class Project extends DataClass implements Insertable<Project> {
       bundleSizeBytes: serializer.fromJson<int?>(json['bundleSizeBytes']),
       downloadedAt: serializer.fromJson<DateTime?>(json['downloadedAt']),
       areaOfInterest: serializer.fromJson<String?>(json['areaOfInterest']),
+      aoiLayerId: serializer.fromJson<String?>(json['aoiLayerId']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
       updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
     );
@@ -354,6 +380,7 @@ class Project extends DataClass implements Insertable<Project> {
       'bundleSizeBytes': serializer.toJson<int?>(bundleSizeBytes),
       'downloadedAt': serializer.toJson<DateTime?>(downloadedAt),
       'areaOfInterest': serializer.toJson<String?>(areaOfInterest),
+      'aoiLayerId': serializer.toJson<String?>(aoiLayerId),
       'createdAt': serializer.toJson<DateTime>(createdAt),
       'updatedAt': serializer.toJson<DateTime>(updatedAt),
     };
@@ -371,6 +398,7 @@ class Project extends DataClass implements Insertable<Project> {
           Value<int?> bundleSizeBytes = const Value.absent(),
           Value<DateTime?> downloadedAt = const Value.absent(),
           Value<String?> areaOfInterest = const Value.absent(),
+          Value<String?> aoiLayerId = const Value.absent(),
           DateTime? createdAt,
           DateTime? updatedAt}) =>
       Project(
@@ -390,6 +418,7 @@ class Project extends DataClass implements Insertable<Project> {
             downloadedAt.present ? downloadedAt.value : this.downloadedAt,
         areaOfInterest:
             areaOfInterest.present ? areaOfInterest.value : this.areaOfInterest,
+        aoiLayerId: aoiLayerId.present ? aoiLayerId.value : this.aoiLayerId,
         createdAt: createdAt ?? this.createdAt,
         updatedAt: updatedAt ?? this.updatedAt,
       );
@@ -416,6 +445,8 @@ class Project extends DataClass implements Insertable<Project> {
       areaOfInterest: data.areaOfInterest.present
           ? data.areaOfInterest.value
           : this.areaOfInterest,
+      aoiLayerId:
+          data.aoiLayerId.present ? data.aoiLayerId.value : this.aoiLayerId,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
     );
@@ -435,6 +466,7 @@ class Project extends DataClass implements Insertable<Project> {
           ..write('bundleSizeBytes: $bundleSizeBytes, ')
           ..write('downloadedAt: $downloadedAt, ')
           ..write('areaOfInterest: $areaOfInterest, ')
+          ..write('aoiLayerId: $aoiLayerId, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt')
           ..write(')'))
@@ -454,6 +486,7 @@ class Project extends DataClass implements Insertable<Project> {
       bundleSizeBytes,
       downloadedAt,
       areaOfInterest,
+      aoiLayerId,
       createdAt,
       updatedAt);
   @override
@@ -471,6 +504,7 @@ class Project extends DataClass implements Insertable<Project> {
           other.bundleSizeBytes == this.bundleSizeBytes &&
           other.downloadedAt == this.downloadedAt &&
           other.areaOfInterest == this.areaOfInterest &&
+          other.aoiLayerId == this.aoiLayerId &&
           other.createdAt == this.createdAt &&
           other.updatedAt == this.updatedAt);
 }
@@ -487,6 +521,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
   final Value<int?> bundleSizeBytes;
   final Value<DateTime?> downloadedAt;
   final Value<String?> areaOfInterest;
+  final Value<String?> aoiLayerId;
   final Value<DateTime> createdAt;
   final Value<DateTime> updatedAt;
   final Value<int> rowid;
@@ -502,6 +537,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
     this.bundleSizeBytes = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.areaOfInterest = const Value.absent(),
+    this.aoiLayerId = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -518,6 +554,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
     this.bundleSizeBytes = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.areaOfInterest = const Value.absent(),
+    this.aoiLayerId = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.updatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -537,6 +574,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
     Expression<int>? bundleSizeBytes,
     Expression<DateTime>? downloadedAt,
     Expression<String>? areaOfInterest,
+    Expression<String>? aoiLayerId,
     Expression<DateTime>? createdAt,
     Expression<DateTime>? updatedAt,
     Expression<int>? rowid,
@@ -553,6 +591,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
       if (bundleSizeBytes != null) 'bundle_size_bytes': bundleSizeBytes,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
       if (areaOfInterest != null) 'area_of_interest': areaOfInterest,
+      if (aoiLayerId != null) 'aoi_layer_id': aoiLayerId,
       if (createdAt != null) 'created_at': createdAt,
       if (updatedAt != null) 'updated_at': updatedAt,
       if (rowid != null) 'rowid': rowid,
@@ -571,6 +610,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
       Value<int?>? bundleSizeBytes,
       Value<DateTime?>? downloadedAt,
       Value<String?>? areaOfInterest,
+      Value<String?>? aoiLayerId,
       Value<DateTime>? createdAt,
       Value<DateTime>? updatedAt,
       Value<int>? rowid}) {
@@ -586,6 +626,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
       bundleSizeBytes: bundleSizeBytes ?? this.bundleSizeBytes,
       downloadedAt: downloadedAt ?? this.downloadedAt,
       areaOfInterest: areaOfInterest ?? this.areaOfInterest,
+      aoiLayerId: aoiLayerId ?? this.aoiLayerId,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       rowid: rowid ?? this.rowid,
@@ -628,6 +669,9 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
     if (areaOfInterest.present) {
       map['area_of_interest'] = Variable<String>(areaOfInterest.value);
     }
+    if (aoiLayerId.present) {
+      map['aoi_layer_id'] = Variable<String>(aoiLayerId.value);
+    }
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
@@ -654,6 +698,7 @@ class ProjectsCompanion extends UpdateCompanion<Project> {
           ..write('bundleSizeBytes: $bundleSizeBytes, ')
           ..write('downloadedAt: $downloadedAt, ')
           ..write('areaOfInterest: $areaOfInterest, ')
+          ..write('aoiLayerId: $aoiLayerId, ')
           ..write('createdAt: $createdAt, ')
           ..write('updatedAt: $updatedAt, ')
           ..write('rowid: $rowid')
@@ -1098,6 +1143,16 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
   late final GeneratedColumn<String> dataSourceId = GeneratedColumn<String>(
       'data_source_id', aliasedName, true,
       type: DriftSqlType.string, requiredDuringInsert: false);
+  static const VerificationMeta _isEditableMeta =
+      const VerificationMeta('isEditable');
+  @override
+  late final GeneratedColumn<bool> isEditable = GeneratedColumn<bool>(
+      'is_editable', aliasedName, false,
+      type: DriftSqlType.bool,
+      requiredDuringInsert: false,
+      defaultConstraints:
+          GeneratedColumn.constraintIsAlways('CHECK ("is_editable" IN (0, 1))'),
+      defaultValue: const Constant(true));
   static const VerificationMeta _downloadedAtMeta =
       const VerificationMeta('downloadedAt');
   @override
@@ -1115,6 +1170,7 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
         formId,
         style,
         dataSourceId,
+        isEditable,
         downloadedAt
       ];
   @override
@@ -1166,6 +1222,12 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
           dataSourceId.isAcceptableOrUnknown(
               data['data_source_id']!, _dataSourceIdMeta));
     }
+    if (data.containsKey('is_editable')) {
+      context.handle(
+          _isEditableMeta,
+          isEditable.isAcceptableOrUnknown(
+              data['is_editable']!, _isEditableMeta));
+    }
     if (data.containsKey('downloaded_at')) {
       context.handle(
           _downloadedAtMeta,
@@ -1195,6 +1257,8 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
           .read(DriftSqlType.string, data['${effectivePrefix}style']),
       dataSourceId: attachedDatabase.typeMapping
           .read(DriftSqlType.string, data['${effectivePrefix}data_source_id']),
+      isEditable: attachedDatabase.typeMapping
+          .read(DriftSqlType.bool, data['${effectivePrefix}is_editable'])!,
       downloadedAt: attachedDatabase.typeMapping.read(
           DriftSqlType.dateTime, data['${effectivePrefix}downloaded_at'])!,
     );
@@ -1217,6 +1281,9 @@ class Layer extends DataClass implements Insertable<Layer> {
   /// If this layer was imported from an external data source, this is its id.
   /// Used by D-phase to know where edits / deletes should be pushed back to.
   final String? dataSourceId;
+
+  /// Mirrors server `layers.is_editable`. AOI source layers are false.
+  final bool isEditable;
   final DateTime downloadedAt;
   const Layer(
       {required this.id,
@@ -1226,6 +1293,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       this.formId,
       this.style,
       this.dataSourceId,
+      required this.isEditable,
       required this.downloadedAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1243,6 +1311,7 @@ class Layer extends DataClass implements Insertable<Layer> {
     if (!nullToAbsent || dataSourceId != null) {
       map['data_source_id'] = Variable<String>(dataSourceId);
     }
+    map['is_editable'] = Variable<bool>(isEditable);
     map['downloaded_at'] = Variable<DateTime>(downloadedAt);
     return map;
   }
@@ -1260,6 +1329,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       dataSourceId: dataSourceId == null && nullToAbsent
           ? const Value.absent()
           : Value(dataSourceId),
+      isEditable: Value(isEditable),
       downloadedAt: Value(downloadedAt),
     );
   }
@@ -1275,6 +1345,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       formId: serializer.fromJson<String?>(json['formId']),
       style: serializer.fromJson<String?>(json['style']),
       dataSourceId: serializer.fromJson<String?>(json['dataSourceId']),
+      isEditable: serializer.fromJson<bool>(json['isEditable']),
       downloadedAt: serializer.fromJson<DateTime>(json['downloadedAt']),
     );
   }
@@ -1289,6 +1360,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       'formId': serializer.toJson<String?>(formId),
       'style': serializer.toJson<String?>(style),
       'dataSourceId': serializer.toJson<String?>(dataSourceId),
+      'isEditable': serializer.toJson<bool>(isEditable),
       'downloadedAt': serializer.toJson<DateTime>(downloadedAt),
     };
   }
@@ -1301,6 +1373,7 @@ class Layer extends DataClass implements Insertable<Layer> {
           Value<String?> formId = const Value.absent(),
           Value<String?> style = const Value.absent(),
           Value<String?> dataSourceId = const Value.absent(),
+          bool? isEditable,
           DateTime? downloadedAt}) =>
       Layer(
         id: id ?? this.id,
@@ -1311,6 +1384,7 @@ class Layer extends DataClass implements Insertable<Layer> {
         style: style.present ? style.value : this.style,
         dataSourceId:
             dataSourceId.present ? dataSourceId.value : this.dataSourceId,
+        isEditable: isEditable ?? this.isEditable,
         downloadedAt: downloadedAt ?? this.downloadedAt,
       );
   Layer copyWithCompanion(LayersCompanion data) {
@@ -1326,6 +1400,8 @@ class Layer extends DataClass implements Insertable<Layer> {
       dataSourceId: data.dataSourceId.present
           ? data.dataSourceId.value
           : this.dataSourceId,
+      isEditable:
+          data.isEditable.present ? data.isEditable.value : this.isEditable,
       downloadedAt: data.downloadedAt.present
           ? data.downloadedAt.value
           : this.downloadedAt,
@@ -1342,6 +1418,7 @@ class Layer extends DataClass implements Insertable<Layer> {
           ..write('formId: $formId, ')
           ..write('style: $style, ')
           ..write('dataSourceId: $dataSourceId, ')
+          ..write('isEditable: $isEditable, ')
           ..write('downloadedAt: $downloadedAt')
           ..write(')'))
         .toString();
@@ -1349,7 +1426,7 @@ class Layer extends DataClass implements Insertable<Layer> {
 
   @override
   int get hashCode => Object.hash(id, projectId, name, geometryType, formId,
-      style, dataSourceId, downloadedAt);
+      style, dataSourceId, isEditable, downloadedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1361,6 +1438,7 @@ class Layer extends DataClass implements Insertable<Layer> {
           other.formId == this.formId &&
           other.style == this.style &&
           other.dataSourceId == this.dataSourceId &&
+          other.isEditable == this.isEditable &&
           other.downloadedAt == this.downloadedAt);
 }
 
@@ -1372,6 +1450,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
   final Value<String?> formId;
   final Value<String?> style;
   final Value<String?> dataSourceId;
+  final Value<bool> isEditable;
   final Value<DateTime> downloadedAt;
   final Value<int> rowid;
   const LayersCompanion({
@@ -1382,6 +1461,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     this.formId = const Value.absent(),
     this.style = const Value.absent(),
     this.dataSourceId = const Value.absent(),
+    this.isEditable = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -1393,6 +1473,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     this.formId = const Value.absent(),
     this.style = const Value.absent(),
     this.dataSourceId = const Value.absent(),
+    this.isEditable = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
@@ -1407,6 +1488,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     Expression<String>? formId,
     Expression<String>? style,
     Expression<String>? dataSourceId,
+    Expression<bool>? isEditable,
     Expression<DateTime>? downloadedAt,
     Expression<int>? rowid,
   }) {
@@ -1418,6 +1500,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
       if (formId != null) 'form_id': formId,
       if (style != null) 'style': style,
       if (dataSourceId != null) 'data_source_id': dataSourceId,
+      if (isEditable != null) 'is_editable': isEditable,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -1431,6 +1514,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
       Value<String?>? formId,
       Value<String?>? style,
       Value<String?>? dataSourceId,
+      Value<bool>? isEditable,
       Value<DateTime>? downloadedAt,
       Value<int>? rowid}) {
     return LayersCompanion(
@@ -1441,6 +1525,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
       formId: formId ?? this.formId,
       style: style ?? this.style,
       dataSourceId: dataSourceId ?? this.dataSourceId,
+      isEditable: isEditable ?? this.isEditable,
       downloadedAt: downloadedAt ?? this.downloadedAt,
       rowid: rowid ?? this.rowid,
     );
@@ -1470,6 +1555,9 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     if (dataSourceId.present) {
       map['data_source_id'] = Variable<String>(dataSourceId.value);
     }
+    if (isEditable.present) {
+      map['is_editable'] = Variable<bool>(isEditable.value);
+    }
     if (downloadedAt.present) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt.value);
     }
@@ -1489,6 +1577,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
           ..write('formId: $formId, ')
           ..write('style: $style, ')
           ..write('dataSourceId: $dataSourceId, ')
+          ..write('isEditable: $isEditable, ')
           ..write('downloadedAt: $downloadedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
@@ -5724,6 +5813,7 @@ typedef $$ProjectsTableCreateCompanionBuilder = ProjectsCompanion Function({
   Value<int?> bundleSizeBytes,
   Value<DateTime?> downloadedAt,
   Value<String?> areaOfInterest,
+  Value<String?> aoiLayerId,
   Value<DateTime> createdAt,
   Value<DateTime> updatedAt,
   Value<int> rowid,
@@ -5740,6 +5830,7 @@ typedef $$ProjectsTableUpdateCompanionBuilder = ProjectsCompanion Function({
   Value<int?> bundleSizeBytes,
   Value<DateTime?> downloadedAt,
   Value<String?> areaOfInterest,
+  Value<String?> aoiLayerId,
   Value<DateTime> createdAt,
   Value<DateTime> updatedAt,
   Value<int> rowid,
@@ -5886,6 +5977,9 @@ class $$ProjectsTableFilterComposer
   ColumnFilters<String> get areaOfInterest => $composableBuilder(
       column: $table.areaOfInterest,
       builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get aoiLayerId => $composableBuilder(
+      column: $table.aoiLayerId, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<DateTime> get createdAt => $composableBuilder(
       column: $table.createdAt, builder: (column) => ColumnFilters(column));
@@ -6066,6 +6160,9 @@ class $$ProjectsTableOrderingComposer
       column: $table.areaOfInterest,
       builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<String> get aoiLayerId => $composableBuilder(
+      column: $table.aoiLayerId, builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<DateTime> get createdAt => $composableBuilder(
       column: $table.createdAt, builder: (column) => ColumnOrderings(column));
 
@@ -6114,6 +6211,9 @@ class $$ProjectsTableAnnotationComposer
 
   GeneratedColumn<String> get areaOfInterest => $composableBuilder(
       column: $table.areaOfInterest, builder: (column) => column);
+
+  GeneratedColumn<String> get aoiLayerId => $composableBuilder(
+      column: $table.aoiLayerId, builder: (column) => column);
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
@@ -6290,6 +6390,7 @@ class $$ProjectsTableTableManager extends RootTableManager<
             Value<int?> bundleSizeBytes = const Value.absent(),
             Value<DateTime?> downloadedAt = const Value.absent(),
             Value<String?> areaOfInterest = const Value.absent(),
+            Value<String?> aoiLayerId = const Value.absent(),
             Value<DateTime> createdAt = const Value.absent(),
             Value<DateTime> updatedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
@@ -6306,6 +6407,7 @@ class $$ProjectsTableTableManager extends RootTableManager<
             bundleSizeBytes: bundleSizeBytes,
             downloadedAt: downloadedAt,
             areaOfInterest: areaOfInterest,
+            aoiLayerId: aoiLayerId,
             createdAt: createdAt,
             updatedAt: updatedAt,
             rowid: rowid,
@@ -6322,6 +6424,7 @@ class $$ProjectsTableTableManager extends RootTableManager<
             Value<int?> bundleSizeBytes = const Value.absent(),
             Value<DateTime?> downloadedAt = const Value.absent(),
             Value<String?> areaOfInterest = const Value.absent(),
+            Value<String?> aoiLayerId = const Value.absent(),
             Value<DateTime> createdAt = const Value.absent(),
             Value<DateTime> updatedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
@@ -6338,6 +6441,7 @@ class $$ProjectsTableTableManager extends RootTableManager<
             bundleSizeBytes: bundleSizeBytes,
             downloadedAt: downloadedAt,
             areaOfInterest: areaOfInterest,
+            aoiLayerId: aoiLayerId,
             createdAt: createdAt,
             updatedAt: updatedAt,
             rowid: rowid,
@@ -6772,6 +6876,7 @@ typedef $$LayersTableCreateCompanionBuilder = LayersCompanion Function({
   Value<String?> formId,
   Value<String?> style,
   Value<String?> dataSourceId,
+  Value<bool> isEditable,
   Value<DateTime> downloadedAt,
   Value<int> rowid,
 });
@@ -6783,6 +6888,7 @@ typedef $$LayersTableUpdateCompanionBuilder = LayersCompanion Function({
   Value<String?> formId,
   Value<String?> style,
   Value<String?> dataSourceId,
+  Value<bool> isEditable,
   Value<DateTime> downloadedAt,
   Value<int> rowid,
 });
@@ -6832,6 +6938,9 @@ class $$LayersTableFilterComposer
 
   ColumnFilters<String> get dataSourceId => $composableBuilder(
       column: $table.dataSourceId, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<bool> get isEditable => $composableBuilder(
+      column: $table.isEditable, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<DateTime> get downloadedAt => $composableBuilder(
       column: $table.downloadedAt, builder: (column) => ColumnFilters(column));
@@ -6886,6 +6995,9 @@ class $$LayersTableOrderingComposer
       column: $table.dataSourceId,
       builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<bool> get isEditable => $composableBuilder(
+      column: $table.isEditable, builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<DateTime> get downloadedAt => $composableBuilder(
       column: $table.downloadedAt,
       builder: (column) => ColumnOrderings(column));
@@ -6937,6 +7049,9 @@ class $$LayersTableAnnotationComposer
 
   GeneratedColumn<String> get dataSourceId => $composableBuilder(
       column: $table.dataSourceId, builder: (column) => column);
+
+  GeneratedColumn<bool> get isEditable => $composableBuilder(
+      column: $table.isEditable, builder: (column) => column);
 
   GeneratedColumn<DateTime> get downloadedAt => $composableBuilder(
       column: $table.downloadedAt, builder: (column) => column);
@@ -6992,6 +7107,7 @@ class $$LayersTableTableManager extends RootTableManager<
             Value<String?> formId = const Value.absent(),
             Value<String?> style = const Value.absent(),
             Value<String?> dataSourceId = const Value.absent(),
+            Value<bool> isEditable = const Value.absent(),
             Value<DateTime> downloadedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
@@ -7003,6 +7119,7 @@ class $$LayersTableTableManager extends RootTableManager<
             formId: formId,
             style: style,
             dataSourceId: dataSourceId,
+            isEditable: isEditable,
             downloadedAt: downloadedAt,
             rowid: rowid,
           ),
@@ -7014,6 +7131,7 @@ class $$LayersTableTableManager extends RootTableManager<
             Value<String?> formId = const Value.absent(),
             Value<String?> style = const Value.absent(),
             Value<String?> dataSourceId = const Value.absent(),
+            Value<bool> isEditable = const Value.absent(),
             Value<DateTime> downloadedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
@@ -7025,6 +7143,7 @@ class $$LayersTableTableManager extends RootTableManager<
             formId: formId,
             style: style,
             dataSourceId: dataSourceId,
+            isEditable: isEditable,
             downloadedAt: downloadedAt,
             rowid: rowid,
           ),

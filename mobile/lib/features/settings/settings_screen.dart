@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
+import '../../core/api/dio_client.dart';
+import '../../core/app_update.dart';
 import '../../core/settings/app_settings.dart';
 import '../../core/settings/basemap_options.dart';
 import '../../core/settings/settings_provider.dart';
@@ -51,7 +54,9 @@ class SettingsScreen extends ConsumerWidget {
                   const _GnssDiagnosticTile(),
                   const SizedBox(height: 24),
                   _SectionHeader(label: 'About'),
-                  _AboutTile(),
+                  const _AboutTile(),
+                  const SizedBox(height: 8),
+                  const _CheckForUpdatesTile(),
                 ],
               ),
             ),
@@ -559,13 +564,95 @@ class _LocationSourcePlaceholder extends ConsumerWidget {
 }
 
 class _AboutTile extends StatelessWidget {
+  const _AboutTile();
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<PackageInfo>(
+      future: PackageInfo.fromPlatform(),
+      builder: (context, snap) {
+        final info = snap.data;
+        final subtitle = info == null
+            ? 'Loading…'
+            : 'v${info.version} · build ${info.buildNumber}';
+        return Card(
+          child: ListTile(
+            leading: const Icon(Icons.info_outline),
+            title: const Text('Field Collector'),
+            subtitle: Text(subtitle),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CheckForUpdatesTile extends ConsumerStatefulWidget {
+  const _CheckForUpdatesTile();
+
+  @override
+  ConsumerState<_CheckForUpdatesTile> createState() =>
+      _CheckForUpdatesTileState();
+}
+
+class _CheckForUpdatesTileState extends ConsumerState<_CheckForUpdatesTile> {
+  var _busy = false;
+
+  Future<void> _check() async {
+    final dio = ref.read(dioProvider);
+    if (dio == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Connect to a server first')),
+      );
+      return;
+    }
+
+    setState(() => _busy = true);
+    try {
+      final result = await fetchAndroidUpdate(dio);
+      if (!mounted) return;
+      if (result == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No published release found')),
+        );
+        return;
+      }
+      if (!result.updateAvailable) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'You are up to date (v${result.localVersionName})',
+            ),
+          ),
+        );
+        return;
+      }
+      await showUpdateDialog(context, result, allowDismiss: true);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Update check failed: $e')),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Card(
       child: ListTile(
-        leading: const Icon(Icons.info_outline),
-        title: const Text('Field Collector'),
-        subtitle: const Text('v0.1.0 · Build dev'),
+        leading: _busy
+            ? const SizedBox(
+                width: 24,
+                height: 24,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.system_update),
+        title: const Text('Check for updates'),
+        subtitle: const Text('Download the latest Android APK if available'),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: _busy ? null : _check,
       ),
     );
   }

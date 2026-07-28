@@ -39,10 +39,10 @@ type SyncFeature struct {
 	// ── D1.2: reference-edit linkage ──
 	SourceRef          *string         `json:"source_ref,omitempty"`
 	DataSourceID       *uuid.UUID      `json:"data_source_id,omitempty"`
-	OriginalAttributes json.RawMessage `json:"original_attributes,omitempty"`
-	OriginalGeometry *string `json:"original_geometry,omitempty"`
-	Deleted            bool            `json:"deleted,omitempty"`
-	DeletedAt          *time.Time      `json:"deleted_at,omitempty"`
+	OriginalAttributes json.RawMessage  `json:"original_attributes,omitempty"`
+	OriginalGeometry   *json.RawMessage `json:"original_geometry,omitempty"` // GeoJSON object (same as geometry)
+	Deleted            bool             `json:"deleted,omitempty"`
+	DeletedAt          *time.Time       `json:"deleted_at,omitempty"`
 }
 type SyncPushReceipt struct {
 	SyncLogID uuid.UUID `json:"sync_log_id"` // 👈 NEW

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/auth/auth_state.dart';
+import 'core/app_update.dart';
 import 'core/server_config.dart';
 import 'core/settings/settings_provider.dart';
 import 'core/theme.dart';
@@ -49,7 +50,9 @@ class _Bootstrap extends ConsumerWidget {
         if (!auth.isLoggedIn) {
           return const LoginScreen();
         }
-        return const NotificationHost(child: ProjectsListScreen());
+        return const AppUpdateGate(
+          child: NotificationHost(child: ProjectsListScreen()),
+        );
       },
     );
   }

@@ -18,6 +18,65 @@ function canWriteBack(feature: any, linked: boolean): boolean {
   return feature.change_type === "inserted";
 }
 
+function hasGeomEdit(feature: any): boolean {
+  const g = feature?.geometry;
+  const o = feature?.original_geometry;
+  if (!g || !o) return false;
+  return String(g).trim() !== String(o).trim();
+}
+
+function WriteBackStatusBadges({ feature }: { feature: any }) {
+  const ct = feature?.change_type || "";
+  const applied = !!feature?.write_back_applied;
+  const badges: { key: string; label: string; className: string }[] = [];
+
+  if (applied) {
+    badges.push({
+      key: "applied",
+      label: "Applied to source",
+      className: "bg-emerald-50 text-emerald-700",
+    });
+  } else if (ct === "inserted" || ct === "updated" || ct === "deleted") {
+    badges.push({
+      key: "pending",
+      label:
+        ct === "inserted"
+          ? "Pending insert"
+          : ct === "deleted"
+            ? "Pending delete"
+            : "Pending update",
+      className: "bg-amber-50 text-amber-800",
+    });
+  } else {
+    badges.push({
+      key: "unchanged",
+      label: feature?.status || "unchanged",
+      className: "bg-gray-100 text-gray-600",
+    });
+  }
+
+  if (hasGeomEdit(feature) && !applied) {
+    badges.push({
+      key: "geom",
+      label: "Geom edited",
+      className: "bg-violet-50 text-violet-800",
+    });
+  }
+
+  return (
+    <>
+      {badges.map((b) => (
+        <span
+          key={b.key}
+          className={`rounded-full px-2 py-0.5 text-xs ${b.className}`}
+        >
+          {b.label}
+        </span>
+      ))}
+    </>
+  );
+}
+
 interface Props {
   projectId: string;
   layerId: string;
@@ -422,24 +481,7 @@ export function LayerFeatureTable({
                     {!linked && (
                       <td className="px-3 py-2">
                         <div className="flex flex-wrap items-center gap-1">
-                          <span
-                            className={`rounded-full px-2 py-0.5 text-xs ${
-                              f.status === "approved"
-                                ? "bg-green-50 text-green-700"
-                                : f.status === "rejected"
-                                  ? "bg-red-50 text-red-700"
-                                  : f.status === "submitted"
-                                    ? "bg-blue-50 text-blue-700"
-                                    : "bg-gray-100 text-gray-600"
-                            }`}
-                          >
-                            {f.status}
-                          </span>
-                          {f.write_back_applied && (
-                            <span className="rounded-full px-2 py-0.5 text-xs bg-emerald-50 text-emerald-700">
-                              Written back
-                            </span>
-                          )}
+                          <WriteBackStatusBadges feature={f} />
                         </div>
                       </td>
                     )}

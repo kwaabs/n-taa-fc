@@ -18,6 +18,7 @@ import { UsersPage } from "./pages/UsersPage";
 import { UserDetailPage } from "./pages/UserDetailPage";
 import { TeamDetailPage } from "./pages/TeamDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { DownloadPage } from "./pages/DownloadPage";
 
 export default function App() {
   // Pre-emptive token refresh in the background
@@ -42,6 +43,7 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/download" element={<DownloadPage />} />
       <Route
         path="/"
         element={

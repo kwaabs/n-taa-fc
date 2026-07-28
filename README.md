@@ -191,5 +191,5 @@ Without ADB reverse, the Android emulator can still reach the host at `http://10
 ## Out of scope (v1)
 
 - Merging the two APIs or frontends into one process
-- Production Coolify cutover
+- Production Coolify cutover — use [`infra/docker-compose.coolify.yml`](infra/docker-compose.coolify.yml) (Traefik labels; set `*_HOST` + OAuth env in Coolify)
 - Deep data migration of live prod dumps

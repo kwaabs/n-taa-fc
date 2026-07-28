@@ -47,6 +47,7 @@ export function ReconcileFlowModal({
     const [activeSampleTab, setActiveSampleTab] = useState<"safe" | "conflicts">(
         "safe"
     );
+    const [acks, setAcks] = useState<Record<string, boolean>>({});
     const pollRef = useRef<number | null>(null);
     const [stuckSeconds, setStuckSeconds] = useState(0);
     const [forcing, setForcing] = useState(false);
@@ -61,6 +62,11 @@ export function ReconcileFlowModal({
             api.previewReconciliation(projectId, layerId, dataSource.id),
         onSuccess: (data: any) => {
             setPreview(data);
+            const next: Record<string, boolean> = {};
+            for (const key of data?.required_acknowledgments ?? []) {
+                next[key] = false;
+            }
+            setAcks(next);
             setPhase("confirm");
         },
         onError: (err: any) => {
@@ -132,7 +138,16 @@ export function ReconcileFlowModal({
     // ── Phase 3: Apply mutation ──
     const applyMutation = useMutation({
         mutationFn: () =>
-            api.applyReconciliation(projectId, layerId, dataSource.id),
+            api.applyReconciliation(
+                projectId,
+                layerId,
+                dataSource.id,
+                undefined,
+                undefined,
+                Object.entries(acks)
+                    .filter(([, v]) => v)
+                    .map(([k]) => k),
+            ),
         onSuccess: (resp: any) => {
             const id = resp?.job_id;
             if (!id) {
@@ -258,6 +273,18 @@ export function ReconcileFlowModal({
 
     const sampleSafe = preview?.sample_safe ?? [];
     const sampleConflicts = preview?.sample_conflicts ?? [];
+    const precautions: Array<{
+        code: string;
+        severity: string;
+        message: string;
+        requires_ack?: boolean;
+        ack_key?: string;
+    }> = preview?.precautions ?? [];
+    const applyBlocked = !!preview?.apply_blocked;
+    const requiredAcks: string[] = preview?.required_acknowledgments ?? [];
+    const allAcksChecked =
+        requiredAcks.length === 0 || requiredAcks.every((k) => acks[k]);
+    const canApply = safeCount > 0 && !applyBlocked && allAcksChecked;
 
     return (
         <>
@@ -378,6 +405,54 @@ export function ReconcileFlowModal({
                                                 </div>
                                             </div>
                                         </div>
+
+                                        {/* Registered precautions */}
+                                        {precautions.length > 0 && (
+                                            <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 flex flex-col gap-2">
+                                                <p className="text-[10px] uppercase tracking-wide text-slate-500 font-medium">
+                                                    Write-back precautions
+                                                </p>
+                                                {precautions.map((p) => (
+                                                    <div
+                                                        key={p.code}
+                                                        className={
+                                                            "text-xs rounded-md px-2 py-1.5 border " +
+                                                            (p.severity === "blocker"
+                                                                ? "border-red-200 bg-red-50 text-red-900"
+                                                                : p.severity === "warning"
+                                                                  ? "border-amber-200 bg-amber-50 text-amber-950"
+                                                                  : "border-slate-200 bg-white text-slate-700")
+                                                        }
+                                                    >
+                                                        <span className="font-medium uppercase text-[10px] tracking-wide opacity-70">
+                                                            {p.severity}
+                                                        </span>
+                                                        <p className="mt-0.5">{p.message}</p>
+                                                        {p.requires_ack && p.ack_key && (
+                                                            <label className="mt-1.5 flex items-start gap-2 cursor-pointer">
+                                                                <input
+                                                                    type="checkbox"
+                                                                    className="mt-0.5"
+                                                                    checked={!!acks[p.ack_key]}
+                                                                    onChange={(e) =>
+                                                                        setAcks((prev) => ({
+                                                                            ...prev,
+                                                                            [p.ack_key!]: e.target.checked,
+                                                                        }))
+                                                                    }
+                                                                />
+                                                                <span>
+                                                                    I understand and accept risk{" "}
+                                                                    <code className="text-[10px] bg-black/5 px-1 rounded">
+                                                                        {p.ack_key}
+                                                                    </code>
+                                                                </span>
+                                                            </label>
+                                                        )}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
 
                                         {/* Warning banners */}
                                         {safeCount > 0 && (
@@ -608,7 +683,7 @@ export function ReconcileFlowModal({
                                 >
                                     Cancel
                                 </button>
-                                {safeCount > 0 && (
+                                {canApply && (
                                     <button
                                         onClick={() => applyMutation.mutate()}
                                         disabled={applyMutation.isPending}
@@ -620,6 +695,16 @@ export function ReconcileFlowModal({
                                             : `Apply ${safeCount} change${safeCount === 1 ? "" : "s"}`}
                                         <ArrowRight className="h-3.5 w-3.5" />
                                     </button>
+                                )}
+                                {safeCount > 0 && applyBlocked && (
+                                    <div className="flex-1 text-xs text-red-700 text-center self-center">
+                                        Apply blocked — fix precautions first
+                                    </div>
+                                )}
+                                {safeCount > 0 && !applyBlocked && !allAcksChecked && (
+                                    <div className="flex-1 text-xs text-amber-800 text-center self-center">
+                                        Acknowledge all warnings to apply
+                                    </div>
                                 )}
                                 {safeCount === 0 && totalPending > 0 && (
                                     <div className="flex-1 text-xs text-gray-500 text-center self-center">

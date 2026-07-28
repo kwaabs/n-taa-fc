@@ -6,21 +6,25 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 
+	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/geostyle"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/model"
 	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/repository"
 )
 
 type StyleService struct {
+	db         *bun.DB
 	layerRepo  *repository.LayerRepo
 	memberRepo *repository.MemberRepo
 }
 
-func NewStyleService(layerRepo *repository.LayerRepo, memberRepo *repository.MemberRepo) *StyleService {
-	return &StyleService{layerRepo: layerRepo, memberRepo: memberRepo}
+func NewStyleService(db *bun.DB, layerRepo *repository.LayerRepo, memberRepo *repository.MemberRepo) *StyleService {
+	return &StyleService{db: db, layerRepo: layerRepo, memberRepo: memberRepo}
 }
 
-// UpdateStyle replaces the layer's style. Validates first.
+// UpdateStyle replaces the layer's style.
+// Linked dbo layers write to app.layers (shared with geo); others write public.layers.style.
 func (s *StyleService) UpdateStyle(ctx context.Context, layerID, userID uuid.UUID, rawStyle json.RawMessage) (*model.Layer, error) {
 	layer, err := s.layerRepo.FindByID(ctx, layerID)
 	if err != nil {
@@ -36,42 +40,44 @@ func (s *StyleService) UpdateStyle(ctx context.Context, layerID, userID uuid.UUI
 	if err != nil {
 		return nil, fmt.Errorf("invalid style JSON: %w", err)
 	}
+	if style == nil {
+		return nil, fmt.Errorf("style body required")
+	}
+	if err := style.Validate(); err != nil {
+		return nil, fmt.Errorf("style validation failed: %w", err)
+	}
 
-	if style != nil {
-		if err := style.Validate(); err != nil {
-			return nil, fmt.Errorf("style validation failed: %w", err)
+	if layer.SourceType == "linked_table" {
+		resolved, err := geostyle.SaveLinkedStyle(ctx, s.db, layer, style)
+		if err != nil {
+			return nil, err
 		}
-		raw, err := style.MarshalToRaw()
+		raw, err := resolved.MarshalToRaw()
 		if err != nil {
 			return nil, err
 		}
 		layer.Style = raw
-	} else {
-		layer.Style = json.RawMessage("{}")
+		return layer, nil
 	}
 
+	raw, err := style.MarshalToRaw()
+	if err != nil {
+		return nil, err
+	}
+	layer.Style = raw
 	if err := s.layerRepo.Update(ctx, layer); err != nil {
 		return nil, fmt.Errorf("failed to update layer: %w", err)
 	}
-
 	return layer, nil
 }
 
-// GetStyle returns the parsed style of a layer (with default fallback).
+// GetStyle returns the parsed style of a layer.
+// Linked dbo layers resolve live from app.layers.
 func (s *StyleService) GetStyle(ctx context.Context, layerID uuid.UUID) (*model.LayerStyle, error) {
 	layer, err := s.layerRepo.FindByID(ctx, layerID)
 	if err != nil {
 		return nil, fmt.Errorf("layer not found")
 	}
 
-	style, err := model.UnmarshalStyle(layer.Style)
-	if err != nil {
-		return nil, err
-	}
-
-	if style == nil {
-		style = model.DefaultStyle(layer.GeometryType)
-	}
-
-	return style, nil
+	return geostyle.ResolveLayerStyle(ctx, s.db, layer)
 }

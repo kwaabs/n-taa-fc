@@ -12,8 +12,9 @@ import (
     "github.com/google/uuid"
     "github.com/uptrace/bun"
 
-    "github.com/kwaabs/n-taa-fc/services/fc-api/internal/model"
-    "github.com/kwaabs/n-taa-fc/services/fc-api/internal/repository"
+	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/geostyle"
+	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/model"
+	"github.com/kwaabs/n-taa-fc/services/fc-api/internal/repository"
 )
 
 type LayerService struct {
@@ -119,6 +120,7 @@ func (s *LayerService) List(ctx context.Context, projectID, userID uuid.UUID) ([
     }
     for i := range layers {
         hydrateLinkedMeta(ctx, s, &layers[i])
+        _ = geostyle.ApplyResolvedStyleJSON(ctx, s.db, &layers[i])
     }
     return layers, nil
 }
@@ -203,6 +205,7 @@ func (s *LayerService) Get(ctx context.Context, layerID, userID uuid.UUID) (*mod
         return nil, fmt.Errorf("access denied: not a member of this project")
     }
     hydrateLinkedMeta(ctx, s, layer)
+    _ = geostyle.ApplyResolvedStyleJSON(ctx, s.db, layer)
     return layer, nil
 }
 
@@ -222,9 +225,26 @@ func (s *LayerService) Update(ctx context.Context, layerID, userID uuid.UUID, re
         layer.FormID = req.FormID
     }
     if req.Style != nil {
+        if layer.SourceType == "linked_table" {
+            // Shared symbology lives in app.layers — use PUT …/style instead.
+            return nil, fmt.Errorf("use the Style tab (PUT /style) to edit linked layer symbology")
+        }
         layer.Style = *req.Style
     }
     if req.IsEditable != nil {
+        if *req.IsEditable {
+            locked, err := s.isProjectAOILayer(ctx, layer.ProjectID, layer.ID)
+            if err != nil {
+                return nil, err
+            }
+            if locked {
+                return nil, fmt.Errorf("cannot enable editing: this layer is the project AOI source")
+            }
+        }
+        // Set explicitly — bun OmitZero would skip is_editable=false.
+        if err := s.layerRepo.SetEditable(ctx, layer.ID, *req.IsEditable); err != nil {
+            return nil, fmt.Errorf("failed to update layer: %w", err)
+        }
         layer.IsEditable = *req.IsEditable
     }
     if req.IsVisibleByDefault != nil {
@@ -237,7 +257,16 @@ func (s *LayerService) Update(ctx context.Context, layerID, userID uuid.UUID, re
     if err := s.layerRepo.Update(ctx, layer); err != nil {
         return nil, fmt.Errorf("failed to update layer: %w", err)
     }
+    _ = geostyle.ApplyResolvedStyleJSON(ctx, s.db, layer)
     return layer, nil
+}
+
+func (s *LayerService) isProjectAOILayer(ctx context.Context, projectID, layerID uuid.UUID) (bool, error) {
+    project := new(model.Project)
+    if err := s.db.NewSelect().Model(project).Column("config").Where("id = ?", projectID).Scan(ctx); err != nil {
+        return false, fmt.Errorf("project not found")
+    }
+    return project.IsAOILayer(layerID), nil
 }
 
 // Delete performs a permission-checked **shallow** delete.

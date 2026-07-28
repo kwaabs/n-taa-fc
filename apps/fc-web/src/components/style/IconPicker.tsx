@@ -1,12 +1,14 @@
 import { useState, useMemo, useRef } from "react";
 import * as Icons from "lucide-react";
-import { useMutation } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Search, Upload, X, Check } from "lucide-react";
 
 interface Props {
   projectId: string;
   currentIcon?: string;
+  /** When true, only show shared geo/FC map symbols (geo:name). */
+  sharedSymbolsOnly?: boolean;
   onSelect: (iconRef: string) => void;
   onClose: () => void;
 }
@@ -41,17 +43,38 @@ function toPascalCase(name: string): string {
     .join("");
 }
 
-export function IconPicker({ projectId, currentIcon, onSelect, onClose }: Props) {
-  const [tab, setTab] = useState<"lucide" | "custom">("lucide");
+export function IconPicker({
+  projectId,
+  currentIcon,
+  sharedSymbolsOnly = false,
+  onSelect,
+  onClose,
+}: Props) {
+  const [tab, setTab] = useState<"geo" | "lucide" | "custom">(
+    sharedSymbolsOnly ? "geo" : "lucide",
+  );
   const [search, setSearch] = useState("");
   const [uploadedIcon, setUploadedIcon] = useState<{ iconRef: string; url: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const { data: geoSymbols = [], isError, isLoading, error } = useQuery({
+    queryKey: ["mapSymbols"],
+    queryFn: () => api.listMapSymbols(),
+    enabled: sharedSymbolsOnly || tab === "geo",
+  });
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return ICON_NAMES;
     return ICON_NAMES.filter((n) => n.includes(q));
   }, [search]);
+
+  const filteredGeo = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const list = Array.isArray(geoSymbols) ? geoSymbols : [];
+    if (!q) return list;
+    return list.filter((s) => s.name?.toLowerCase().includes(q));
+  }, [geoSymbols, search]);
 
   const uploadMutation = useMutation({
     mutationFn: (file: File) => api.uploadIcon(projectId, file),
@@ -70,7 +93,9 @@ export function IconPicker({ projectId, currentIcon, onSelect, onClose }: Props)
       <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 shrink-0">
-          <h2 className="text-lg font-semibold text-gray-900">Choose Icon</h2>
+          <h2 className="text-lg font-semibold text-gray-900">
+            {sharedSymbolsOnly ? "Choose map symbol" : "Choose Icon"}
+          </h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
             <X className="h-5 w-5" />
           </button>
@@ -78,31 +103,108 @@ export function IconPicker({ projectId, currentIcon, onSelect, onClose }: Props)
 
         {/* Tabs */}
         <div className="flex gap-1 border-b border-gray-200 px-6 pt-2 shrink-0">
-          <button
-            onClick={() => setTab("lucide")}
-            className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
-              tab === "lucide"
-                ? "border-blue-600 text-blue-600"
-                : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            Lucide Icons
-          </button>
-          <button
-            onClick={() => setTab("custom")}
-            className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
-              tab === "custom"
-                ? "border-blue-600 text-blue-600"
-                : "border-transparent text-gray-500 hover:text-gray-700"
-            }`}
-          >
-            Custom SVG
-          </button>
+          {(sharedSymbolsOnly || true) && (
+            <button
+              onClick={() => setTab("geo")}
+              className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                tab === "geo"
+                  ? "border-blue-600 text-blue-600"
+                  : "border-transparent text-gray-500 hover:text-gray-700"
+              }`}
+            >
+              Map symbols
+            </button>
+          )}
+          {!sharedSymbolsOnly && (
+            <>
+              <button
+                onClick={() => setTab("lucide")}
+                className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  tab === "lucide"
+                    ? "border-blue-600 text-blue-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                Lucide Icons
+              </button>
+              <button
+                onClick={() => setTab("custom")}
+                className={`px-3 py-2 text-sm font-medium border-b-2 transition-colors ${
+                  tab === "custom"
+                    ? "border-blue-600 text-blue-600"
+                    : "border-transparent text-gray-500 hover:text-gray-700"
+                }`}
+              >
+                Custom SVG
+              </button>
+            </>
+          )}
         </div>
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto p-6">
-          {tab === "lucide" && (
+          {tab === "geo" && (
+            <>
+              <div className="relative mb-4">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Search symbols…"
+                  className="w-full rounded-lg border border-gray-300 pl-9 pr-3 py-2 text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-4 sm:grid-cols-6 gap-3">
+                {filteredGeo.map((s) => {
+                  const isSelected = currentIcon === s.ref || currentIcon === `geo:${s.name}`;
+                  return (
+                    <button
+                      key={s.name}
+                      onClick={() => onSelect(s.ref)}
+                      title={s.name}
+                      className={`relative flex flex-col items-center gap-1 rounded-lg p-2 transition-all ${
+                        isSelected
+                          ? "bg-blue-100 border-2 border-blue-500"
+                          : "bg-gray-50 border-2 border-transparent hover:bg-blue-50 hover:border-blue-200"
+                      }`}
+                    >
+                      <div
+                        className="h-8 w-8 flex items-center justify-center"
+                        dangerouslySetInnerHTML={{
+                          __html: String(s.svg || "").replace(
+                            /<svg/i,
+                            '<svg width="32" height="32"',
+                          ),
+                        }}
+                      />
+                      <span className="text-[10px] text-gray-600 truncate w-full text-center">
+                        {s.name}
+                      </span>
+                      {isSelected && (
+                        <Check className="absolute top-0.5 right-0.5 h-3 w-3 text-blue-600" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+              {isLoading && (
+                <p className="text-sm text-gray-500 text-center mt-6">Loading symbols…</p>
+              )}
+              {isError && (
+                <p className="text-sm text-red-600 text-center mt-6">
+                  Could not load map symbols. Restart fc-api and try again.
+                  {(error as Error)?.message ? ` (${(error as Error).message})` : ""}
+                </p>
+              )}
+              {!isLoading && !isError && filteredGeo.length === 0 && (
+                <p className="text-sm text-gray-500 italic text-center mt-6">
+                  No symbols matching "{search}"
+                </p>
+              )}
+            </>
+          )}
+
+          {tab === "lucide" && !sharedSymbolsOnly && (
             <>
               {/* Search */}
               <div className="relative mb-4">
@@ -150,7 +252,7 @@ export function IconPicker({ projectId, currentIcon, onSelect, onClose }: Props)
             </>
           )}
 
-          {tab === "custom" && (
+          {tab === "custom" && !sharedSymbolsOnly && (
             <div className="flex flex-col gap-4">
               {/* Upload zone */}
               <div

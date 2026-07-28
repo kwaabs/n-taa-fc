@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { useAuth } from "@/lib/auth";
-import { Settings as SettingsIcon, User, Bell, Database, Shield, Info } from "lucide-react";
+import { Settings as SettingsIcon, User, Bell, Database, Shield, Info, Download } from "lucide-react";
 
 const sections = [
   { id: "account", label: "Account", icon: User },
@@ -145,8 +146,14 @@ export function SettingsPage() {
               <FieldRow label="License">
                 <p className="text-sm text-gray-700">MIT — Open Source</p>
               </FieldRow>
-              <FieldRow label="API endpoint">
-                <p className="text-xs text-gray-500 font-mono">http://localhost:5355</p>
+              <FieldRow label="Mobile app">
+                <Link
+                  to="/download"
+                  className="inline-flex items-center gap-1.5 text-sm text-blue-600 hover:underline"
+                >
+                  <Download className="h-3.5 w-3.5" />
+                  Download Android APK
+                </Link>
               </FieldRow>
               <FieldRow label="Inspired by">
                 <p className="text-sm text-gray-700">ODK, KoboToolbox, Esri Field Maps</p>

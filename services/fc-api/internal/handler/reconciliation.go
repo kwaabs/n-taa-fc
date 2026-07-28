@@ -27,8 +27,9 @@ func NewReconciliationHandler(
 // ── Request body types ────────────────────────────────
 
 type ReconcileRequest struct {
-	BatchSize  int         `json:"batch_size,omitempty"`  // optional; default 500
-	FeatureIDs []uuid.UUID `json:"feature_ids,omitempty"` // optional; limit to these features
+	BatchSize        int         `json:"batch_size,omitempty"`
+	FeatureIDs       []uuid.UUID `json:"feature_ids,omitempty"`
+	Acknowledgments  []string    `json:"acknowledgments,omitempty"` // hard_delete, evw_target, home_db_write, skipped_fields
 }
 
 type ResolveConflictRequest struct {
@@ -113,7 +114,7 @@ func (h *ReconciliationHandler) Apply(w http.ResponseWriter, r *http.Request) {
 
     userID := middleware.GetUserID(r.Context())
 
-    job, err := h.svc.EnqueueApply(r.Context(), projectID, layerID, sourceID, userID, req.BatchSize, req.FeatureIDs...)
+    job, err := h.svc.EnqueueApply(r.Context(), projectID, layerID, sourceID, userID, req.BatchSize, req.Acknowledgments, true, req.FeatureIDs...)
     if err != nil {
         if isAccessDenied(err) {
             RespondError(w, http.StatusForbidden, "ACCESS_DENIED", err.Error())

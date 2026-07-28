@@ -81,12 +81,19 @@ class AddFeatureFlow {
     if (db == null) return const [];
 
     // Slice 1 supported only points. Slice 2 expands to include lines too.
+    // AOI source layers are excluded from capture entirely.
+    final project = await (db.select(db.projects)
+          ..where((p) => p.id.equals(projectId)))
+        .getSingleOrNull();
+    final aoiLayerId = project?.aoiLayerId;
+
     final rows = await (db.select(db.layers)
           ..where((l) => l.projectId.equals(projectId))
           ..where((l) => l.geometryType.isIn(['point', 'line', 'polygon'])))
         .get();
 
-    return rows;
+    if (aoiLayerId == null || aoiLayerId.isEmpty) return rows;
+    return rows.where((l) => l.id != aoiLayerId).toList();
   }
 
   static Future<Layer?> _showLayerPicker(

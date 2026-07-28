@@ -123,8 +123,8 @@ func (p *StyleProps) Validate() error {
 		return fmt.Errorf("stroke_width must be >= 0")
 	}
 	if p.Icon != "" {
-		if !regexp.MustCompile(`^(lucide|custom):[\w-]+$`).MatchString(p.Icon) {
-			return fmt.Errorf("icon must match 'lucide:name' or 'custom:id', got %q", p.Icon)
+		if !regexp.MustCompile(`^(lucide|custom|geo):[\w-]+$`).MatchString(p.Icon) {
+			return fmt.Errorf("icon must match 'lucide:name', 'custom:id', or 'geo:name', got %q", p.Icon)
 		}
 	}
     if p.IconSvg != "" {

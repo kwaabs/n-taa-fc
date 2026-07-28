@@ -8,12 +8,16 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@map-symbols": path.resolve(__dirname, "../../shared/map-symbols"),
     },
   },
   server: {
     host: "localhost",
     port: 5357, // stack range (fc-web=5356 … martin=5360)
     strictPort: true,
+    fs: {
+      allow: [path.resolve(__dirname, "../..")],
+    },
     proxy: {
       "/gotrue": {
         target: "http://localhost:5354",

@@ -151,3 +151,35 @@ func (h *ProjectHandler) Dispatch(w http.ResponseWriter, r *http.Request) {
 	}
 	RespondJSON(w, http.StatusOK, project)
 }
+
+type AOIFromLayerRequest struct {
+	LayerID    uuid.UUID `json:"layer_id"`
+	SourceRefs []string  `json:"source_refs"`
+}
+
+// POST /api/v1/projects/{projectID}/aoi/from-layer
+// Builds AOI from selected polygon rows, saves area_of_interest + aoi_layer_id,
+// and locks the source layer (is_editable=false).
+func (h *ProjectHandler) BuildAOIFromLayer(w http.ResponseWriter, r *http.Request) {
+	projectID, err := uuid.Parse(chi.URLParam(r, "projectID"))
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "INVALID_ID", "invalid project ID")
+		return
+	}
+	var req AOIFromLayerRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		RespondError(w, http.StatusBadRequest, "INVALID_JSON", "could not parse request body")
+		return
+	}
+	if req.LayerID == uuid.Nil {
+		RespondError(w, http.StatusBadRequest, "VALIDATION", "layer_id is required")
+		return
+	}
+	userID := middleware.GetUserID(r.Context())
+	result, err := h.svc.BuildAOIFromLayer(r.Context(), projectID, userID, req.LayerID, req.SourceRefs)
+	if err != nil {
+		RespondError(w, http.StatusBadRequest, "AOI_FROM_LAYER_FAILED", err.Error())
+		return
+	}
+	RespondJSON(w, http.StatusOK, result)
+}

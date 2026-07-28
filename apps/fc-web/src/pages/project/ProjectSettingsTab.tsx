@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { BasemapPicker } from "@/components/wizard/BasemapPicker";
 import { AreaDrawer } from "@/components/assignments/AreaDrawer";
 import { AoiPreviewMap } from "@/components/map/AoiPreviewMap";
+import { AoiFromTableModal } from "@/components/map/AoiFromTableModal";
 import { Package } from "lucide-react";
 import { BundleDialog } from "@/components/bundle/BundleDialog";
 import {
@@ -12,6 +13,7 @@ import {
   Send,
   Archive,
   Pentagon,
+  Table2,
   AlertCircle,
   CheckCircle2,
 } from "lucide-react";
@@ -31,7 +33,9 @@ export function ProjectSettingsTab() {
   const [basemapId, setBasemapId] = useState("osm");
   const [basemapCustomUrl, setBasemapCustomUrl] = useState("");
   const [area, setArea] = useState<any | null>(null);
+  const [aoiLayerId, setAoiLayerId] = useState<string | null>(null);
   const [showAreaDrawer, setShowAreaDrawer] = useState(false);
+  const [showAoiFromTable, setShowAoiFromTable] = useState(false);
   const [bufferMeters, setBufferMeters] = useState<number>(20);
   const [saved, setSaved] = useState(false);
   const [showBundleDialog, setShowBundleDialog] = useState(false);
@@ -43,6 +47,7 @@ export function ProjectSettingsTab() {
     setBasemapId(project.config?.basemap_id || "osm");
     setBasemapCustomUrl(project.config?.basemap_custom_url || "");
     setBufferMeters(project.config?.aoi_buffer_meters ?? 20);
+    setAoiLayerId(project.config?.aoi_layer_id || null);
     if (project.area_of_interest) {
       try {
         const geom =
@@ -60,12 +65,23 @@ export function ProjectSettingsTab() {
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      const config: any = { basemap_id: basemapId };
+      // Preserve unrelated config keys (e.g. aoi_source_refs) while updating known fields.
+      const config: any = { ...(project?.config || {}), basemap_id: basemapId };
       if (basemapId === "custom") {
         config.basemap_custom_url = basemapCustomUrl;
+      } else {
+        delete config.basemap_custom_url;
       }
       if (bufferMeters !== 20) {
         config.aoi_buffer_meters = bufferMeters;
+      } else {
+        delete config.aoi_buffer_meters;
+      }
+      if (aoiLayerId) {
+        config.aoi_layer_id = aoiLayerId;
+      } else {
+        delete config.aoi_layer_id;
+        delete config.aoi_source_refs;
       }
       return api.updateProject(projectId!, {
         name,
@@ -77,6 +93,7 @@ export function ProjectSettingsTab() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["project", projectId] });
       queryClient.invalidateQueries({ queryKey: ["projects"] });
+      queryClient.invalidateQueries({ queryKey: ["projectLayers", projectId] });
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     },
@@ -187,6 +204,8 @@ export function ProjectSettingsTab() {
               <p className="text-sm text-gray-500 mb-3">
                 Defines the default map extent and default assignment boundary. Optional —
                 recommended for offline bundles so reference data can be clipped.
+                Draw a polygon, or select one or more polygons from a linked table
+                (e.g. districts).
               </p>
 
               {area ? (
@@ -195,26 +214,36 @@ export function ProjectSettingsTab() {
                 </div>
               ) : (
                 <div className="mb-3 rounded-lg border border-dashed border-gray-200 bg-gray-50 px-4 py-6 text-center text-sm text-gray-500">
-                  No project area defined yet. Draw one to set the default map extent
-                  and assignment boundary.
+                  No project area defined yet. Draw one or select districts from a
+                  polygon layer.
                 </div>
               )}
 
-              <button
-                onClick={() => setShowAreaDrawer(true)}
-                disabled={!isEditable}
-                className={`w-full flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-3 text-sm transition-colors ${area
-                  ? "border-green-300 bg-green-50 text-green-700"
-                  : "border-gray-300 text-gray-600 hover:border-blue-300 hover:bg-blue-50"
-                  } disabled:opacity-50 disabled:cursor-not-allowed`}
-              >
-                <Pentagon className="h-4 w-4" />
-                {area
-                  ? isEditable
-                    ? "Edit Project Area"
-                    : "View Project Area"
-                  : "Draw Project Area"}
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  onClick={() => setShowAreaDrawer(true)}
+                  disabled={!isEditable}
+                  className={`flex items-center justify-center gap-2 rounded-lg border-2 border-dashed px-4 py-3 text-sm transition-colors ${area
+                    ? "border-green-300 bg-green-50 text-green-700"
+                    : "border-gray-300 text-gray-600 hover:border-blue-300 hover:bg-blue-50"
+                    } disabled:opacity-50 disabled:cursor-not-allowed`}
+                >
+                  <Pentagon className="h-4 w-4" />
+                  {area
+                    ? isEditable
+                      ? "Draw / edit area"
+                      : "View drawn area"
+                    : "Draw project area"}
+                </button>
+                <button
+                  onClick={() => setShowAoiFromTable(true)}
+                  disabled={!isEditable}
+                  className="flex items-center justify-center gap-2 rounded-lg border-2 border-dashed border-gray-300 px-4 py-3 text-sm text-gray-600 hover:border-blue-300 hover:bg-blue-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <Table2 className="h-4 w-4" />
+                  Select from table
+                </button>
+              </div>
               {!isEditable && (
                 <p className="text-xs text-gray-500 mt-2">
                   Project is active — archive it first to draw or change the area.
@@ -222,11 +251,21 @@ export function ProjectSettingsTab() {
               )}
               {area && isEditable && (
                 <button
-                  onClick={() => setArea(null)}
+                  onClick={() => {
+                    setArea(null);
+                    setAoiLayerId(null);
+                  }}
                   className="text-xs text-red-500 hover:underline mt-2"
                 >
                   Remove area
                 </button>
+              )}
+
+              {aoiLayerId && (
+                <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mt-3">
+                  This area was built from a polygon layer. That layer is locked
+                  for field users — insert, update, and delete are disabled.
+                </p>
               )}
 
               {area && (
@@ -329,9 +368,27 @@ export function ProjectSettingsTab() {
           initialPolygon={area}
           onSave={(geom) => {
             setArea(geom);
+            // Drawn AOI is not tied to a layer — clear AOI-layer lock marker.
+            setAoiLayerId(null);
             setShowAreaDrawer(false);
           }}
           onClose={() => setShowAreaDrawer(false)}
+        />
+      )}
+
+      {showAoiFromTable && (
+        <AoiFromTableModal
+          projectId={projectId!}
+          onApply={(geom, layerId) => {
+            setArea(geom);
+            setAoiLayerId(layerId);
+            setShowAoiFromTable(false);
+            queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+            queryClient.invalidateQueries({
+              queryKey: ["projectLayers", projectId],
+            });
+          }}
+          onClose={() => setShowAoiFromTable(false)}
         />
       )}
 

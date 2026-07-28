@@ -3,9 +3,111 @@ import { computeFeatureStyle } from "@/lib/style-engine";
 
 interface Props {
   style: LayerStyle;
+  geometryType?: string;
 }
 
-export function StylePreview({ style }: Props) {
+function dashArray(lineStyle?: string): string | undefined {
+  switch (lineStyle) {
+    case "dashed":
+      return "6 4";
+    case "dotted":
+      return "2 3";
+    case "dash_dot":
+      return "8 3 2 3";
+    default:
+      return undefined;
+  }
+}
+
+function Swatch({
+  geometryType,
+  color,
+  size,
+  stroke,
+  strokeW,
+  opacity,
+  lineStyle,
+  iconSvg,
+}: {
+  geometryType?: string;
+  color: string;
+  size: number;
+  stroke: string;
+  strokeW: number;
+  opacity: number;
+  lineStyle?: string;
+  iconSvg?: string;
+}) {
+  if (iconSvg && geometryType === "point") {
+    return (
+      <div
+        className="flex items-center justify-center bg-white rounded border border-gray-200"
+        style={{
+          width: size + 12,
+          height: size + 12,
+          padding: 2,
+          opacity,
+          flexShrink: 0,
+        }}
+        dangerouslySetInnerHTML={{ __html: iconSvg }}
+      />
+    );
+  }
+
+  if (geometryType === "line") {
+    const w = Math.max(size, 1.5);
+    return (
+      <svg width={48} height={16} style={{ flexShrink: 0, opacity }} aria-hidden>
+        <line
+          x1={2}
+          y1={8}
+          x2={46}
+          y2={8}
+          stroke={color}
+          strokeWidth={w}
+          strokeDasharray={dashArray(lineStyle)}
+          strokeLinecap="round"
+        />
+      </svg>
+    );
+  }
+
+  if (geometryType === "polygon") {
+    return (
+      <svg width={28} height={22} style={{ flexShrink: 0, opacity }} aria-hidden>
+        <rect
+          x={2}
+          y={2}
+          width={24}
+          height={18}
+          rx={2}
+          fill={color}
+          fillOpacity={0.35}
+          stroke={stroke || color}
+          strokeWidth={Math.max(strokeW, 1)}
+        />
+      </svg>
+    );
+  }
+
+  // point (default)
+  return (
+    <div
+      style={{
+        width: size + 6,
+        height: size + 6,
+        background: color,
+        border: `${strokeW}px solid ${stroke}`,
+        borderRadius: "50%",
+        boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
+        opacity,
+        flexShrink: 0,
+      }}
+    />
+  );
+}
+
+export function StylePreview({ style, geometryType }: Props) {
   // Sample features: default, plus one that matches each rule
   const samples = [{ label: "Default", attrs: {} as any }];
 
@@ -37,35 +139,18 @@ export function StylePreview({ style }: Props) {
           const color = computed.color || "#3b82f6";
           const stroke = computed.stroke_color || "#ffffff";
           const strokeW = computed.stroke_width || 2;
-          const iconSvg = computed.icon_svg;
           return (
             <div key={i} className="flex items-center gap-3 rounded-lg bg-gray-50 px-3 py-2">
-              {iconSvg ? (
-                <div
-                  className="flex items-center justify-center bg-white rounded border border-gray-200"
-                  style={{
-                    width: size + 12,
-                    height: size + 12,
-                    padding: 2,
-                    opacity: computed.opacity ?? 1,
-                    flexShrink: 0,
-                  }}
-                  dangerouslySetInnerHTML={{ __html: iconSvg }}
-                />
-              ) : (
-                <div
-                  style={{
-                    width: size + 6,
-                    height: size + 6,
-                    background: color,
-                    border: `${strokeW}px solid ${stroke}`,
-                    borderRadius: "50%",
-                    boxShadow: "0 2px 4px rgba(0,0,0,0.1)",
-                    opacity: computed.opacity ?? 1,
-                    flexShrink: 0,
-                  }}
-                />
-              )}
+              <Swatch
+                geometryType={geometryType}
+                color={color}
+                size={size}
+                stroke={stroke}
+                strokeW={strokeW}
+                opacity={computed.opacity ?? 1}
+                lineStyle={computed.line_style}
+                iconSvg={computed.icon_svg}
+              />
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-gray-700 truncate">{s.label}</p>
                 {Object.keys(s.attrs).length > 0 && (

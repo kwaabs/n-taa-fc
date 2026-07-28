@@ -24,6 +24,7 @@ type ReconciliationService struct {
 	dataSourceRepo     *repository.DataSourceRepo
 	layerRepo          *repository.LayerRepo
 	memberRepo         *repository.MemberRepo
+	projectRepo        *repository.ProjectRepo
 	reconciliationRepo *repository.ReconciliationRepo
 	connOpener         *SourceConnectionOpener
 }
@@ -33,6 +34,7 @@ func NewReconciliationService(
 	dataSourceRepo *repository.DataSourceRepo,
 	layerRepo *repository.LayerRepo,
 	memberRepo *repository.MemberRepo,
+	projectRepo *repository.ProjectRepo,
 	reconciliationRepo *repository.ReconciliationRepo,
 	connOpener *SourceConnectionOpener,
 ) *ReconciliationService {
@@ -41,6 +43,7 @@ func NewReconciliationService(
 		dataSourceRepo:     dataSourceRepo,
 		layerRepo:          layerRepo,
 		memberRepo:         memberRepo,
+		projectRepo:        projectRepo,
 		reconciliationRepo: reconciliationRepo,
 		connOpener:         connOpener,
 	}
@@ -50,12 +53,15 @@ func NewReconciliationService(
 
 // PreviewResult is what /preview returns to the admin.
 type PreviewResult struct {
-	JobID           uuid.UUID       `json:"job_id"`
-	DataSource      DataSourceBrief `json:"data_source"`
-	Summary         PreviewSummary  `json:"summary"`
-	ByChangeType    ByChangeType    `json:"by_change_type"`
-	SampleSafe      []SampleRow     `json:"sample_safe,omitempty"`
-	SampleConflicts []SampleRow     `json:"sample_conflicts,omitempty"`
+	JobID           uuid.UUID             `json:"job_id"`
+	DataSource      DataSourceBrief       `json:"data_source"`
+	Summary         PreviewSummary        `json:"summary"`
+	ByChangeType    ByChangeType          `json:"by_change_type"`
+	SampleSafe      []SampleRow           `json:"sample_safe,omitempty"`
+	SampleConflicts []SampleRow           `json:"sample_conflicts,omitempty"`
+	Precautions     []WritebackPrecaution `json:"precautions,omitempty"`
+	ApplyBlocked    bool                  `json:"apply_blocked"`
+	RequiredAcks    []string              `json:"required_acknowledgments,omitempty"`
 }
 
 type DataSourceBrief struct {
@@ -113,6 +119,10 @@ func (s *ReconciliationService) Preview(
 		return nil, fmt.Errorf("access denied: not a member of this project")
 	}
 
+	if err := s.rejectAOILayer(ctx, projectID, layerID); err != nil {
+		return nil, err
+	}
+
 	// 2. Load data source + verify it's owned by the layer
 	ds, err := s.dataSourceRepo.FindByID(ctx, dataSourceID)
 	if err != nil {
@@ -167,6 +177,9 @@ func (s *ReconciliationService) Preview(
 	totalConflicts := 0
 	totalErrors := 0
 
+	var allPendingForHonesty []model.Feature
+	pendingGeomChanges := 0
+
 	offset := 0
 	for {
 		batch, err := s.featureRepo.ListPendingChanges(ctx, dataSourceID, batchSize, offset, featureIDs...)
@@ -176,6 +189,13 @@ func (s *ReconciliationService) Preview(
 		}
 		if len(batch) == 0 {
 			break
+		}
+		if len(allPendingForHonesty) < 200 {
+			remain := 200 - len(allPendingForHonesty)
+			if remain > len(batch) {
+				remain = len(batch)
+			}
+			allPendingForHonesty = append(allPendingForHonesty, batch[:remain]...)
 		}
 
 		// Group by sourceRef so we can bulk-query the source DB once per chunk
@@ -248,6 +268,10 @@ func (s *ReconciliationService) Preview(
 				}
 
 				fieldChanged := changedFields(origAttrs, newAttrs)
+				if gChanged, _ := geomChanged(&f); gChanged {
+					fieldChanged = append(fieldChanged, "__geometry__")
+					pendingGeomChanges++
+				}
 				sourceChanged := changedFieldsInBoth(origAttrs, srcRow)
 				conflicting := intersect(fieldChanged, sourceChanged)
 
@@ -359,6 +383,13 @@ func (s *ReconciliationService) Preview(
 		status = "partial"
 	}
 	_ = s.reconciliationRepo.MarkFinished(ctx, job.ID, status, summaryJSON, "")
+
+	skipped := collectSkippedAttrSamples(ctx, srcDB, ds, allPendingForHonesty)
+	result.Precautions = assessWritebackPrecautions(
+		ctx, srcDB, ds, result.ByChangeType.Deleted.Safe, skipped, pendingGeomChanges,
+	)
+	result.ApplyBlocked = hasWritebackBlocker(result.Precautions)
+	result.RequiredAcks = requiredAckKeys(result.Precautions)
 
 	return result, nil
 }
@@ -621,7 +652,7 @@ func (s *ReconciliationService) Apply(
 	batchSize int,
 	featureIDs ...uuid.UUID,
 ) (*ApplyResult, error) {
-	job, err := s.EnqueueApply(ctx, projectID, layerID, dataSourceID, userID, batchSize, featureIDs...)
+	job, err := s.EnqueueApply(ctx, projectID, layerID, dataSourceID, userID, batchSize, nil, false, featureIDs...)
 	if err != nil {
 		return nil, err
 	}
@@ -749,18 +780,34 @@ func (s *ReconciliationService) applyUpdate(
 		pos++
 	}
 
-	// Geometry SET (single, canonical place)
+	// Geometry SET (single, canonical place). If text differs but PostGIS
+	// considers them equal, skip the geom SET (formatting noise).
 	if geomChanged && geomCol != "" {
-		setClauses = append(setClauses,
-			fmt.Sprintf("%s = ST_SetSRID(ST_GeomFromGeoJSON($%d), %d)", quoteIdent(geomCol), pos, geomSRID))
-		args = append(args, geomGeoJSON)
-		pos++
+		skipGeom := false
+		if f.OriginalGeometry != nil && *f.OriginalGeometry != "" {
+			var equals bool
+			qErr := tx.QueryRowContext(ctx, `
+				SELECT ST_Equals(
+					ST_SetSRID(ST_GeomFromGeoJSON($1), $3),
+					ST_SetSRID(ST_GeomFromGeoJSON($2), $3)
+				)`, geomGeoJSON, *f.OriginalGeometry, geomSRID).Scan(&equals)
+			if qErr == nil && equals {
+				skipGeom = true
+			}
+		}
+		if !skipGeom {
+			setClauses = append(setClauses,
+				fmt.Sprintf("%s = ST_SetSRID(ST_GeomFromGeoJSON($%d), %d)", quoteIdent(geomCol), pos, geomSRID))
+			args = append(args, geomGeoJSON)
+			pos++
+		} else {
+			geomChanged = false
+		}
 	}
 
-	// Defensive: if we somehow got past the early-skip but still have nothing
-	// to SET, fail with a clear error rather than emitting "UPDATE x SET WHERE ...".
+	// Nothing left after filtering / ST_Equals skip — treat as already in sync.
 	if len(setClauses) == 0 {
-		return "failed", "no SET clauses generated — check data source geometry_column config", nil
+		return "skipped", "no fields to apply (already in sync)", nil
 	}
 
 	args = append(args, f.SourceRef)
@@ -793,18 +840,9 @@ func (s *ReconciliationService) applyUpdate(
 // geomChanged determines whether the feature's geometry differs from the
 // captured pre-edit snapshot. Returns the new GeoJSON if it changed.
 //
-// Currently a no-op: mobile doesn't ship geometry edits until D0.6. When D0.6
-// lands, replace the stub with a real comparison (and PostGIS ST_Equals at apply
-// time if precision matters).
+// Requires both Geometry and OriginalGeometry (synced from mobile as GeoJSON).
+// Missing original snapshot → skip geometry write-back (attribute-only).
 func geomChanged(f *model.Feature) (bool, string) {
-	// We compare f.Geometry (current GeoJSON from mobile/admin edit) vs
-	// f.OriginalGeometry (the snapshot captured at edit-start time).
-	//
-	// Reasoning for returning false in edge cases:
-	//   - No current geometry: not editing geometry, leave source's untouched.
-	//   - No original geometry: snapshot is missing (e.g., collected-from-scratch
-	//     feature with no reference). We can't know if user changed it relative
-	//     to source — safest to skip geometry updates.
 	if f.Geometry == nil || *f.Geometry == "" {
 		return false, ""
 	}
@@ -812,13 +850,8 @@ func geomChanged(f *model.Feature) (bool, string) {
 		return false, ""
 	}
 
-	// Both columns are stored as PostGIS geometry; SELECT casts them to GeoJSON
-	// text. Tolerant byte-compare after whitespace trim. If formats diverge
-	// (e.g., precision rounding) we could upgrade to PostGIS ST_Equals, but
-	// for v1 this is sufficient — mobile produces deterministic GeoJSON.
 	current := strings.TrimSpace(*f.Geometry)
 	original := strings.TrimSpace(*f.OriginalGeometry)
-
 	if current == original {
 		return false, ""
 	}
@@ -1089,10 +1122,15 @@ func (s *ReconciliationService) logEntry(
 // EnqueueApply creates a pending apply job (no work done yet). The worker pool
 // picks it up and runs ApplyJob asynchronously. Returns the job ID for polling.
 // When featureIDs is non-empty, only those pending features are applied.
+// acknowledgments must include every required_ack from a recent Preview when
+// requireAcks is true (bulk reconcile UI). Single-feature write-back may set
+// requireAcks=false but still refuses blockers (views, misconfig).
 func (s *ReconciliationService) EnqueueApply(
 	ctx context.Context,
 	projectID, layerID, dataSourceID, userID uuid.UUID,
 	batchSize int,
+	acknowledgments []string,
+	requireAcks bool,
 	featureIDs ...uuid.UUID,
 ) (*model.ReconciliationJob, error) {
 	if batchSize <= 0 {
@@ -1102,6 +1140,10 @@ func (s *ReconciliationService) EnqueueApply(
 	// Membership check up front — fast fail before queuing
 	if _, err := s.memberRepo.FindByProjectAndUser(ctx, projectID, userID); err != nil {
 		return nil, fmt.Errorf("access denied: not a member of this project")
+	}
+
+	if err := s.rejectAOILayer(ctx, projectID, layerID); err != nil {
+		return nil, err
 	}
 
 	// Validate data source belongs to this layer + has reconciliation config
@@ -1114,6 +1156,50 @@ func (s *ReconciliationService) EnqueueApply(
 	}
 	if ds.SchemaName() == "" || ds.TableName() == "" || ds.IDColumn() == "" {
 		return nil, fmt.Errorf("data source %s missing schema/table/id_column", ds.ID)
+	}
+
+	srcDB, err := s.connOpener.OpenForDataSource(ctx, ds)
+	if err != nil {
+		return nil, fmt.Errorf("open source connection: %w", err)
+	}
+	defer srcDB.Close()
+
+	// Sample pending rows for honesty + delete counts (cheap first page).
+	sample, _ := s.featureRepo.ListPendingChanges(ctx, dataSourceID, 200, 0, featureIDs...)
+	pendingDeletes := 0
+	for i := range sample {
+		if sample[i].ChangeType == "deleted" {
+			pendingDeletes++
+		}
+	}
+	// If first page is full of non-deletes, still count deletes cheaply via CountPendingChanges.
+	if _, deletes, err := s.featureRepo.CountPendingChanges(ctx, dataSourceID); err == nil {
+		pendingDeletes = deletes
+	}
+	skipped := collectSkippedAttrSamples(ctx, srcDB, ds, sample)
+	pendingGeom := 0
+	for i := range sample {
+		if gChanged, _ := geomChanged(&sample[i]); gChanged {
+			pendingGeom++
+		}
+	}
+	precautions := assessWritebackPrecautions(ctx, srcDB, ds, pendingDeletes, skipped, pendingGeom)
+	if hasWritebackBlocker(precautions) {
+		var msgs []string
+		for _, p := range precautions {
+			if p.Severity == "blocker" {
+				msgs = append(msgs, p.Message)
+			}
+		}
+		return nil, fmt.Errorf("apply blocked: %s", strings.Join(msgs, "; "))
+	}
+	if requireAcks {
+		if missing := missingAcknowledgments(requiredAckKeys(precautions), acknowledgments); len(missing) > 0 {
+			return nil, fmt.Errorf(
+				"apply requires acknowledgments %v (from reconcile preview precautions)",
+				missing,
+			)
+		}
 	}
 
 	job := &model.ReconciliationJob{
@@ -1133,6 +1219,20 @@ func (s *ReconciliationService) EnqueueApply(
 		return nil, fmt.Errorf("create apply job: %w", err)
 	}
 	return job, nil
+}
+
+func (s *ReconciliationService) rejectAOILayer(ctx context.Context, projectID, layerID uuid.UUID) error {
+	if s.projectRepo == nil {
+		return nil
+	}
+	project, err := s.projectRepo.FindByID(ctx, projectID)
+	if err != nil {
+		return fmt.Errorf("project not found")
+	}
+	if project.IsAOILayer(layerID) {
+		return fmt.Errorf("layer is the project AOI source and cannot be reconciled")
+	}
+	return nil
 }
 
 // Cancel marks a running or pending job as cancelling. The worker checks
@@ -1605,7 +1705,7 @@ func (s *ReconciliationService) WriteBackFeature(
 		return nil, fmt.Errorf("check applied: %w", err)
 	}
 
-	job, err := s.EnqueueApply(ctx, projectID, layerID, ds.ID, userID, 1, feature.ID)
+	job, err := s.EnqueueApply(ctx, projectID, layerID, ds.ID, userID, 1, nil, false, feature.ID)
 	if err != nil {
 		return nil, err
 	}

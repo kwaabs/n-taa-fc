@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Link2, Map as MapIcon } from "lucide-react";
+import { Link2, Map as MapIcon, ArrowRight } from "lucide-react";
 import { api } from "@/lib/api";
 import { LayerFeatureTable } from "./LayerFeatureTable";
 import { LayerFeatureDrawer } from "./LayerFeatureDrawer";
@@ -12,12 +12,12 @@ interface Props {
   layer?: any;
 }
 
-type Feature = "linked" | "collected";
+type Viewer = "linked" | "collected";
 
 export function LayerFeaturesTab({ projectId, layerId, layer }: Props) {
   const [selectedFeature, setSelectedFeature] = useState<any | null>(null);
   const isLinked = layer?.source_type === "linked_table";
-  const [viewer, setViewer] = useState<Viewer>("collected");
+  const [viewer, setViewer] = useState<Viewer | null>(null);
 
   let tableLabel = "source table";
   let linkedCount: number | null =
@@ -51,8 +51,18 @@ export function LayerFeaturesTab({ projectId, layerId, layer }: Props) {
   const collectedCount = collectedSummary?.collected_count ?? 0;
   const insertedCount = collectedSummary?.new_count ?? 0;
   const updatedCount = collectedSummary?.updated_count ?? 0;
+  const deletedCount = collectedSummary?.deleted_count ?? 0;
+  const pendingWriteBack =
+    insertedCount + updatedCount + deletedCount;
 
-  const showingLinked = isLinked && viewer === "linked";
+  // Smart default: Field changes when anything pending/collected; else Live source.
+  useEffect(() => {
+    if (!isLinked || viewer != null) return;
+    setViewer(pendingWriteBack > 0 || collectedCount > 0 ? "collected" : "linked");
+  }, [isLinked, viewer, pendingWriteBack, collectedCount]);
+
+  const activeViewer: Viewer = viewer ?? "collected";
+  const showingLinked = isLinked && activeViewer === "linked";
 
   return (
     <div className="flex flex-col gap-4">
@@ -66,12 +76,12 @@ export function LayerFeaturesTab({ projectId, layerId, layer }: Props) {
                     linkedCount != null
                       ? ` · ${linkedCount.toLocaleString()} total`
                       : ""
-                  }.`
-                : `Field collections synced to this layer${
+                  }. Read-only here — edits sync into Field changes.`
+                : `Field changes synced from mobile into Field Collector${
                     collectedCount
-                      ? ` · ${collectedCount.toLocaleString()} collected`
+                      ? ` · ${collectedCount.toLocaleString()} rows`
                       : ""
-                  }.`
+                  }. Reconcile writes these to the live source.`
               : "All features collected or imported into this layer."}
           </p>
         </div>
@@ -93,24 +103,24 @@ export function LayerFeaturesTab({ projectId, layerId, layer }: Props) {
               type="button"
               onClick={() => setViewer("collected")}
               className={`rounded-md px-3 py-1.5 text-xs font-medium ${
-                viewer === "collected"
+                activeViewer === "collected"
                   ? "bg-white text-gray-900 shadow-sm"
                   : "text-gray-600 hover:text-gray-900"
               }`}
             >
-              Collected
+              Field changes (FC)
               {collectedCount > 0 ? ` (${collectedCount})` : ""}
             </button>
             <button
               type="button"
               onClick={() => setViewer("linked")}
               className={`rounded-md px-3 py-1.5 text-xs font-medium ${
-                viewer === "linked"
+                activeViewer === "linked"
                   ? "bg-white text-gray-900 shadow-sm"
                   : "text-gray-600 hover:text-gray-900"
               }`}
             >
-              Linked source
+              Live source
               {linkedCount != null ? ` (${linkedCount})` : ""}
             </button>
           </div>
@@ -118,24 +128,42 @@ export function LayerFeaturesTab({ projectId, layerId, layer }: Props) {
           <div className="rounded-lg bg-blue-50 border border-blue-200 px-3 py-2 text-xs text-blue-800 flex items-start gap-2">
             <Link2 className="h-3.5 w-3.5 shrink-0 mt-0.5" />
             <span>
-              {viewer === "collected" ? (
+              {activeViewer === "collected" ? (
                 <>
-                  New / edited features from mobile sync land here in Field
-                  Collector (<code className="bg-blue-100 px-1 rounded">public.features</code>
-                  ). Linked dbo rows stay under <strong>Linked source</strong>
-                  {insertedCount || updatedCount
-                    ? ` — currently ${insertedCount} new, ${updatedCount} updated.`
+                  These are <strong>pending overlays</strong> in{" "}
+                  <code className="bg-blue-100 px-1 rounded">public.features</code>
+                  — not the live dbo table. Use{" "}
+                  <strong>Data Sources → Reconcile</strong> to push inserts/updates/deletes
+                  to <strong className="font-mono">{tableLabel}</strong>
+                  {pendingWriteBack
+                    ? ` (${insertedCount} new · ${updatedCount} updated · ${deletedCount} deleted).`
                     : "."}
                 </>
               ) : (
                 <>
-                  Live linked table from <strong className="font-mono">{tableLabel}</strong>.
-                  New field collections do not change this count — switch to{" "}
-                  <strong>Collected</strong> to see synced mobile captures.
+                  Live linked table <strong className="font-mono">{tableLabel}</strong>.
+                  Field workers’ edits do not change these counts until reconcile —
+                  switch to <strong>Field changes (FC)</strong> for synced mobile captures.
                 </>
               )}
             </span>
           </div>
+
+          {pendingWriteBack > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 flex items-center justify-between gap-3 flex-wrap">
+              <p className="text-xs text-amber-950">
+                <strong>{pendingWriteBack}</strong> change
+                {pendingWriteBack === 1 ? "" : "s"} waiting to write back to the source table.
+              </p>
+              <Link
+                to={`/projects/${projectId}/layers/${layerId}?tab=sources`}
+                className="inline-flex items-center gap-1 text-xs font-medium text-amber-900 underline hover:no-underline"
+              >
+                Open Data Sources to Reconcile
+                <ArrowRight className="h-3.5 w-3.5" />
+              </Link>
+            </div>
+          )}
         </>
       )}
 

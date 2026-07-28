@@ -21,6 +21,12 @@ export function ProjectLayersPage() {
     enabled: !!projectId,
   });
 
+  const { data: project } = useQuery({
+    queryKey: ["project", projectId],
+    queryFn: () => api.getProject(projectId!),
+    enabled: !!projectId,
+  });
+
   const layerList = Array.isArray(layers) ? layers : [];
 
   const invalidateLayers = () =>
@@ -161,7 +167,11 @@ export function ProjectLayersPage() {
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    {l.is_editable ? "Yes" : "No"}
+                    {l.is_editable
+                      ? "Yes"
+                      : project?.config?.aoi_layer_id === l.id
+                        ? "No (AOI)"
+                        : "No"}
                   </td>
                   <td
                     className="px-4 py-3"

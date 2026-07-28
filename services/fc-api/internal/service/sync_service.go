@@ -169,7 +169,6 @@ func (s *SyncService) Push(ctx context.Context, projectID, userID uuid.UUID, pay
 	if aoiEnforced {
 		aoiBufferMeters = project.AOIBufferMeters()
 	}
-
 	for _, sf := range payload.Features {
 		slog.Info("[D1.2 SERVER DEBUG] incoming feature",
 			"client_id", sf.ClientID,
@@ -189,18 +188,29 @@ func (s *SyncService) Push(ctx context.Context, projectID, userID uuid.UUID, pay
 			continue
 		}
 
-		// Extract geometry — handle both object and JSON-encoded string forms
-		var geomStr *string
-		if sf.Geometry != nil && len(*sf.Geometry) > 0 {
-			raw := string(*sf.Geometry)
-			if len(raw) > 1 && raw[0] == '"' && raw[len(raw)-1] == '"' {
-				var unquoted string
-				if err := json.Unmarshal(*sf.Geometry, &unquoted); err == nil {
-					raw = unquoted
-				}
+		// AOI source layer: reject insert / update / delete from field clients.
+		// (Linked layers often have is_editable=false but still allow reference
+		// edits — only the configured AOI layer is fully locked.)
+		if sf.LayerID != nil && project.IsAOILayer(*sf.LayerID) {
+			msg := "Layer is used as the project AOI and cannot be modified in the field"
+			receipt.Errors = append(receipt.Errors, model.SyncFeatureError{
+				ClientID: sf.ClientID,
+				Issues: []model.SyncFieldError{{
+					FieldID: "_layer",
+					Message: msg,
+				}},
+				Action: "rejected",
+			})
+			if s.syncLogRepo != nil && syncLogID != uuid.Nil {
+				cid := sf.ClientID
+				_ = s.syncLogRepo.LogError(ctx, syncLogID, &cid, nil, "aoi_layer_locked", msg, nil)
 			}
-			geomStr = &raw
+			continue
 		}
+
+		// Extract geometry — handle both object and JSON-encoded string forms
+		geomStr := geoJSONRawToString(sf.Geometry)
+		origGeomStr := geoJSONRawToString(sf.OriginalGeometry)
 
 		// AOI Phase 3: reject features outside buffered AOI.
 		// Deletes always allowed. Grandfathering: only apply to inserts/updates.
@@ -249,8 +259,7 @@ func (s *SyncService) Push(ctx context.Context, projectID, userID uuid.UUID, pay
 			// ── D1.2: reference-edit linkage ──
 			DataSourceID:       sf.DataSourceID,
 			OriginalAttributes: sf.OriginalAttributes,
-
-			OriginalGeometry: sf.OriginalGeometry,
+			OriginalGeometry:   origGeomStr,
 		}
 
 		// SourceRef — model has string, payload has *string. Copy when set.
@@ -269,6 +278,12 @@ func (s *SyncService) Push(ctx context.Context, projectID, userID uuid.UUID, pay
 			feature.ChangeType = "updated"
 		default:
 			feature.ChangeType = "inserted"
+		}
+		if feature.ChangeType == "updated" && feature.SourceRef != "" && origGeomStr == nil && geomStr != nil {
+			slog.Warn("reference update missing original_geometry snapshot; geometry write-back may be skipped",
+				"client_id", sf.ClientID,
+				"source_ref", feature.SourceRef,
+			)
 		}
 		feature.ChangeAt = &now
 		feature.ChangeBy = &userID
@@ -443,4 +458,20 @@ func (s *SyncService) Verify(
 		Found:   found,
 		Missing: missing,
 	}, nil
+}
+
+// geoJSONRawToString normalizes a sync GeoJSON payload (object or JSON string)
+// into text suitable for ST_GeomFromGeoJSON.
+func geoJSONRawToString(raw *json.RawMessage) *string {
+	if raw == nil || len(*raw) == 0 {
+		return nil
+	}
+	s := string(*raw)
+	if len(s) > 1 && s[0] == '"' && s[len(s)-1] == '"' {
+		var unquoted string
+		if err := json.Unmarshal(*raw, &unquoted); err == nil {
+			s = unquoted
+		}
+	}
+	return &s
 }

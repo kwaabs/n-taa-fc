@@ -65,6 +65,18 @@ func (r *LayerRepo) Update(ctx context.Context, layer *model.Layer) error {
 	return err
 }
 
+// SetEditable sets is_editable explicitly (including false). Bun OmitZero skips
+// false bools on Update, so callers that must lock a layer use this.
+func (r *LayerRepo) SetEditable(ctx context.Context, layerID uuid.UUID, editable bool) error {
+	_, err := r.db.NewUpdate().
+		Model((*model.Layer)(nil)).
+		Set("is_editable = ?", editable).
+		Set("updated_at = ?", time.Now()).
+		Where("id = ?", layerID).
+		Exec(ctx)
+	return err
+}
+
 func (r *LayerRepo) Delete(ctx context.Context, id uuid.UUID) error {
 	_, err := r.db.NewDelete().
 		Model((*model.Layer)(nil)).

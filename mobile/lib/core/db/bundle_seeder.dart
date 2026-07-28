@@ -158,6 +158,14 @@ class BundleSeeder {
         if (aoi != null) {
           aoiJson = aoi is String ? aoi : jsonEncode(aoi);
         }
+        String? aoiLayerId;
+        final cfg = projectMeta['config'];
+        if (cfg is Map) {
+          final raw = cfg['aoi_layer_id'];
+          if (raw != null && raw.toString().isNotEmpty) {
+            aoiLayerId = raw.toString();
+          }
+        }
         await _db.upsertProject(
           ProjectsCompanion(
             id: Value(projectId),
@@ -168,6 +176,7 @@ class BundleSeeder {
             status: Value((projectMeta['status'] ?? 'active').toString()),
             version: Value(_asInt(projectMeta['version']) ?? 1),
             areaOfInterest: Value(aoiJson),
+            aoiLayerId: Value(aoiLayerId),
           ),
         );
       }
@@ -209,6 +218,7 @@ class BundleSeeder {
                     : const Value.absent(),
                 // 👇 D1.0: pulled from D1.0 bundle backend (data_source_id)
                 dataSourceId: Value(layer['data_source_id']?.toString()),
+                isEditable: Value(layer['is_editable'] != false),
               ),
             );
         layerCount++;

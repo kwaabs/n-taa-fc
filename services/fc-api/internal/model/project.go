@@ -19,7 +19,7 @@ type Project struct {
 	Status         string          `bun:"status,default:'draft'"                       json:"status"`
 	CreatedBy      uuid.UUID       `bun:"created_by,type:uuid"                         json:"created_by"`
 	Version        int             `bun:"version,default:1"                            json:"version"`
-	AreaOfInterest json.RawMessage `bun:"area_of_interest,type:geometry(Polygon,4326)" json:"area_of_interest,omitempty"`
+	AreaOfInterest json.RawMessage `bun:"area_of_interest,type:geometry(Geometry,4326)" json:"area_of_interest,omitempty"`
 	CreatedAt      time.Time       `bun:"created_at,nullzero,default:now()"            json:"created_at"`
 	UpdatedAt      time.Time       `bun:"updated_at,nullzero,default:now()"            json:"updated_at"`
 
@@ -64,4 +64,28 @@ func (p *Project) AOIBufferMeters() int {
         return *cfg.AOIBufferMeters
     }
     return 20
+}
+
+// AOILayerID returns the linked polygon layer used to build the project AOI, if any.
+// Field edits on that layer must be rejected while it is the AOI source.
+func (p *Project) AOILayerID() *uuid.UUID {
+	if len(p.Config) == 0 {
+		return nil
+	}
+	var cfg struct {
+		AOILayerID *uuid.UUID `json:"aoi_layer_id,omitempty"`
+	}
+	if err := json.Unmarshal(p.Config, &cfg); err != nil {
+		return nil
+	}
+	if cfg.AOILayerID == nil || *cfg.AOILayerID == uuid.Nil {
+		return nil
+	}
+	return cfg.AOILayerID
+}
+
+// IsAOILayer reports whether layerID is the project's AOI source layer.
+func (p *Project) IsAOILayer(layerID uuid.UUID) bool {
+	id := p.AOILayerID()
+	return id != nil && *id == layerID
 }
