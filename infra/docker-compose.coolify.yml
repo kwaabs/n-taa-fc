@@ -2,10 +2,11 @@
 #
 # Coolify setup
 # 1. New Resource → Docker Compose
-# 2. Compose file: infra/docker-compose.coolify.yml  (Base Directory = repo root)
-# 3. Set env vars below (Hosts + Azure/Google). Coolify magic SERVICE_PASSWORD_*
+# 2. Compose file: infra/docker-compose.coolify.yml
+# 3. Base Directory = repo root
+# 4. Set env vars below (Hosts + Azure/Google). Coolify magic SERVICE_PASSWORD_*
 #    are auto-generated on first deploy if left unset in the UI.
-# 4. Do NOT also assign Domains in the Coolify UI for these services —
+# 5. Do NOT also assign Domains in the Coolify UI for these services —
 #    Traefik labels here already own routing (duplicate routers → 404/503).
 #
 # Required host env (no scheme, no path), e.g. fc.example.com:
@@ -47,16 +48,13 @@ services:
 
   # ── One-shot: Field Collector golang-migrate ───────────────
   fc-migrate:
-    image: migrate/migrate:v4.18.1
+    build:
+      context: ..
+      dockerfile: docker/fc-migrate/Dockerfile
     restart: "no"
-    volumes:
-      - ../services/fc-api/migrations:/migrations:ro
-    entrypoint:
-      - /bin/sh
-      - -c
-      - migrate -path /migrations -database "$$DATABASE_URL" up
-    environment:
-      DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable
+    command:
+      - "postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable"
+      - "up"
     depends_on:
       postgres:
         condition: service_healthy
@@ -171,14 +169,15 @@ services:
       GOTRUE_DISABLE_SIGNUP: "false"
       GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
 
-      GOTRUE_EXTERNAL_AZURE_ENABLED: "true"
+      GOTRUE_EXTERNAL_AZURE_ENABLED: ${AZURE_ENABLED:-false}
       GOTRUE_EXTERNAL_AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
       GOTRUE_EXTERNAL_AZURE_SECRET: ${AZURE_CLIENT_SECRET:-}
+      
       GOTRUE_EXTERNAL_AZURE_REDIRECT_URI: https://${GOTRUE_HOST}/callback
       GOTRUE_EXTERNAL_AZURE_URL: https://login.microsoftonline.com/${AZURE_TENANT_ID:-common}
       GOTRUE_EXTERNAL_AZURE_SCOPES: "openid email profile User.Read"
 
-      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "true"
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: ${GOOGLE_ENABLED:-false}
       GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: https://${GOTRUE_HOST}/callback
@@ -236,8 +235,8 @@ services:
   # ── Tippecanoe (internal only) ─────────────────────────────
   tippecanoe:
     build:
-      context: ../docker/tippecanoe
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: docker/tippecanoe/Dockerfile
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
@@ -286,7 +285,6 @@ services:
         condition: service_healthy
       gotrue:
         condition: service_started
-    # distroless — no shell/curl; Traefik healthchecks /health below
     labels:
       <<: *traefik-common
       traefik.http.routers.ntaafc-fc-api.rule: Host(`${FC_API_HOST}`)
@@ -384,7 +382,6 @@ services:
       context: ..
       dockerfile: apps/geo-web/Dockerfile
       args:
-        # Empty → same-origin /api via nginx → geo-api
         VITE_API_URL: ""
         VITE_MARTIN_URL: https://${MARTIN_HOST}
         VITE_GOTRUE_EXTERNAL_URL: https://${GOTRUE_HOST}
