@@ -10,7 +10,7 @@ export function ProjectAccessPage() {
   const [showAssignTeam, setShowAssignTeam] = useState(false);
   const [showAddMember, setShowAddMember] = useState(false);
   const [selectedTeam, setSelectedTeam] = useState("");
-  const [teamRole, setTeamRole] = useState("field_worker");
+  const [teamRole] = useState("field_worker");
   const [memberEmail, setMemberEmail] = useState("");
   const [memberRole, setMemberRole] = useState("field_worker");
 
