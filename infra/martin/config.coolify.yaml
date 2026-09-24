@@ -1,0 +1,32 @@
+# Martin config for Coolify — CORS origins come from env (set in compose).
+# Docs: https://maplibre.org/martin/
+
+listen_addresses: "0.0.0.0:3000"
+
+worker_processes: 2
+
+cors:
+  origin:
+    - "${FC_WEB_URL}"
+    - "${GEO_WEB_URL}"
+    - "${FC_API_URL}"
+
+postgres:
+  connection_string: ${DATABASE_URL}
+  pool_size: 10
+
+  auto_publish:
+    from_schemas:
+      - dbo
+    tables:
+      source_id_format: "{schema}.{table}"
+      id_columns: ogc_fid
+    functions:
+      from_schemas:
+        - dbo
+      source_id_format: "{schema}.{function}"
+
+  functions:
+    reference_features:
+      schema: public
+      function: reference_features

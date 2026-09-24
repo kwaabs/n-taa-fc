@@ -1,0 +1,28 @@
+---
+description: Linked-table reconcile / write-back safety checklist
+globs: services/fc-api/internal/service/reconciliation*.go,services/fc-api/internal/service/writeback_precautions.go,apps/fc-web/src/components/layer/Reconcile*.tsx,apps/fc-web/src/components/layer/LayerDataSourcesTab.tsx
+alwaysApply: false
+---
+
+# Linked-table write-back (reconcile)
+
+Reconcile pushes pending FC `features` (`inserted` / `updated` / `deleted`) into the linked source table. It does **not** rewrite the live Features grid wholesale.
+
+## Before trusting reconcile on a layer
+
+1. **Identity config** on `layer_data_sources.config`: `schema`, `table`, `id_column`, `geometry_column`, `geometry_srid`.
+2. **Writable target**: must be a base table (`relkind` r/p). Views / matviews / foreign tables are **blocked**.
+3. **EVW names**: `*_evw` often means ArcGIS versioned views in production. Local Postgres copies may be plain tables — still require operator ack. Never assume EVW ≡ safe.
+4. **Credentials**: prefer `connection_id`; home-DB fallback requires ack.
+5. **Deletes**: default `hard` permanently deletes source rows — require ack when deletes are pending; prefer soft-delete config for production geo tables.
+6. **Honesty**: form-only fields and `att:` attachments are **not** written; preview must surface skipped keys.
+7. **Dual model**: Features tab = live source; reconcile = pending overlays only.
+8. **Acknowledgments**: bulk Apply must send `acknowledgments` matching preview `required_acknowledgments`. Blockers refuse Apply entirely.
+9. **Geometry**: mobile sends `original_geometry` as a GeoJSON **object** (same as `geometry`). Sync must accept `json.RawMessage`, not `*string`. Missing original snapshot → skip geom SET (attribute-only). Preview should list `__geometry__` when geom would apply.
+10. **Durability**: sync failure keeps captures on-device (`pending`/`failed`/`needs_attention`). Do not treat reconcile/write-back bugs as “field data lost.”
+
+## Do not
+
+- Point reconcile at a real ArcGIS versioned view without an approved write path.
+- Silent-drop columns without surfacing them in preview precautions.
+- Soften blockers to warnings for views/matviews.

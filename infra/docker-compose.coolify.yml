@@ -1,0 +1,422 @@
+# Coolify production stack (single compose — no Makefile).
+#
+# Coolify setup
+# 1. New Resource → Docker Compose
+# 2. Compose file: infra/docker-compose.coolify.yml  (Base Directory = repo root)
+# 3. Set env vars below (Hosts + Azure/Google). Coolify magic SERVICE_PASSWORD_*
+#    are auto-generated on first deploy if left unset in the UI.
+# 4. Do NOT also assign Domains in the Coolify UI for these services —
+#    Traefik labels here already own routing (duplicate routers → 404/503).
+#
+# Required host env (no scheme, no path), e.g. fc.example.com:
+#   FC_WEB_HOST  GEO_WEB_HOST  FC_API_HOST  GOTRUE_HOST  MARTIN_HOST  S3_HOST
+#
+# Optional:
+#   AZURE_TENANT_ID  AZURE_CLIENT_ID  AZURE_CLIENT_SECRET
+#   GOOGLE_CLIENT_ID  GOOGLE_CLIENT_SECRET
+#   SUPERUSER_EMAIL  SUPERUSER_NAME
+#   CORS_ORIGINS  (extra origins for fc-api; defaults to FC/GEO web URLs)
+
+name: n-taa-fc
+
+x-traefik-common: &traefik-common
+  traefik.enable: "true"
+  traefik.docker.network: coolify
+
+services:
+  # ── PostgreSQL (PostGIS) ───────────────────────────────────
+  postgres:
+    image: supabase/postgres:15.14.1.095
+    restart: unless-stopped
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    environment:
+      POSTGRES_PASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      POSTGRES_DB: ntaafc
+    volumes:
+      - coolify-pgdata:/var/lib/postgresql/data
+      - ./postgres/bootstrap.sql:/docker-entrypoint-initdb.d/01-bootstrap.sql:ro
+      - ./postgres:/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U supabase_admin -d ntaafc"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 40s
+    networks:
+      - coolify
+
+  # ── One-shot: Field Collector golang-migrate ───────────────
+  fc-migrate:
+    image: migrate/migrate:v4.18.1
+    restart: "no"
+    volumes:
+      - ../services/fc-api/migrations:/migrations:ro
+    entrypoint:
+      - /bin/sh
+      - -c
+      - migrate -path /migrations -database "$$DATABASE_URL" up
+    environment:
+      DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - coolify
+
+  # ── One-shot: geo SQL + rotate geo_app password ────────────
+  geo-migrate:
+    image: postgres:15-alpine
+    restart: "no"
+    volumes:
+      - ./postgres:/sql:ro
+    environment:
+      PGPASSWORD: ${SERVICE_PASSWORD_POSTGRES}
+      GEO_APP_PASSWORD: ${SERVICE_PASSWORD_GEOAPP}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/002_azure_auth.sql
+        psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/003_layer_permissions.sql
+        psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 \
+          -c "ALTER ROLE geo_app PASSWORD '$$GEO_APP_PASSWORD';"
+    depends_on:
+      fc-migrate:
+        condition: service_completed_successfully
+    networks:
+      - coolify
+
+  # ── Valkey ─────────────────────────────────────────────────
+  valkey:
+    image: valkey/valkey:7
+    restart: unless-stopped
+    volumes:
+      - coolify-valkeydata:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - coolify
+
+  # ── RustFS (S3) ────────────────────────────────────────────
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${SERVICE_PASSWORD_RUSTFS}
+      RUSTFS_CONSOLE_ENABLE: "false"
+      RUSTFS_ADDRESS: ":9000"
+    volumes:
+      - coolify-rustfsdata:/data
+    command: /data
+    labels:
+      <<: *traefik-common
+      traefik.http.routers.ntaafc-s3.rule: Host(`${S3_HOST}`)
+      traefik.http.routers.ntaafc-s3.entrypoints: https
+      traefik.http.routers.ntaafc-s3.tls: "true"
+      traefik.http.routers.ntaafc-s3.tls.certresolver: letsencrypt
+      traefik.http.routers.ntaafc-s3.service: ntaafc-s3
+      traefik.http.services.ntaafc-s3.loadbalancer.server.port: "9000"
+      traefik.http.routers.ntaafc-s3-http.rule: Host(`${S3_HOST}`)
+      traefik.http.routers.ntaafc-s3-http.entrypoints: http
+      traefik.http.routers.ntaafc-s3-http.middlewares: redirect-to-https
+    networks:
+      - coolify
+
+  rustfs-init:
+    image: rustfs/rc
+    restart: "no"
+    depends_on:
+      - rustfs
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      S3_SECRET_KEY: ${SERVICE_PASSWORD_RUSTFS}
+      S3_BUCKET: ${S3_BUCKET:-field-collector}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        sleep 3
+        rc alias set local http://rustfs:9000 "$$S3_ACCESS_KEY" "$$S3_SECRET_KEY"
+        rc mb "local/$$S3_BUCKET" --ignore-existing
+        rc anonymous set download "local/$$S3_BUCKET/public"
+        echo 'Bucket ready'
+    networks:
+      - coolify
+
+  # ── GoTrue (shared auth) ───────────────────────────────────
+  gotrue:
+    image: supabase/gotrue:v2.167.0
+    restart: unless-stopped
+    environment:
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_NAMESPACE: auth
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable&search_path=auth
+
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 8081
+      API_EXTERNAL_URL: https://${GOTRUE_HOST}
+      GOTRUE_SITE_URL: https://${FC_WEB_HOST}
+      GOTRUE_URI_ALLOW_LIST: https://${FC_WEB_HOST},https://${FC_WEB_HOST}/*,https://${GEO_WEB_HOST},https://${GEO_WEB_HOST}/*,fieldcollector://auth-callback
+
+      GOTRUE_JWT_SECRET: ${SERVICE_PASSWORD_JWT}
+      GOTRUE_JWT_EXP: 3600
+
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+      GOTRUE_MAILER_AUTOCONFIRM: "true"
+      GOTRUE_SMTP_ADMIN_EMAIL: ${GOTRUE_ADMIN_EMAIL:-admin@ntaafc.local}
+      GOTRUE_DISABLE_SIGNUP: "false"
+      GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+
+      GOTRUE_EXTERNAL_AZURE_ENABLED: "true"
+      GOTRUE_EXTERNAL_AZURE_CLIENT_ID: ${AZURE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_AZURE_SECRET: ${AZURE_CLIENT_SECRET:-}
+      GOTRUE_EXTERNAL_AZURE_REDIRECT_URI: https://${GOTRUE_HOST}/callback
+      GOTRUE_EXTERNAL_AZURE_URL: https://login.microsoftonline.com/${AZURE_TENANT_ID:-common}
+      GOTRUE_EXTERNAL_AZURE_SCOPES: "openid email profile User.Read"
+
+      GOTRUE_EXTERNAL_GOOGLE_ENABLED: "true"
+      GOTRUE_EXTERNAL_GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: https://${GOTRUE_HOST}/callback
+    depends_on:
+      postgres:
+        condition: service_healthy
+      geo-migrate:
+        condition: service_completed_successfully
+    labels:
+      <<: *traefik-common
+      traefik.http.routers.ntaafc-gotrue.rule: Host(`${GOTRUE_HOST}`)
+      traefik.http.routers.ntaafc-gotrue.entrypoints: https
+      traefik.http.routers.ntaafc-gotrue.tls: "true"
+      traefik.http.routers.ntaafc-gotrue.tls.certresolver: letsencrypt
+      traefik.http.routers.ntaafc-gotrue.service: ntaafc-gotrue
+      traefik.http.services.ntaafc-gotrue.loadbalancer.server.port: "8081"
+      traefik.http.routers.ntaafc-gotrue-http.rule: Host(`${GOTRUE_HOST}`)
+      traefik.http.routers.ntaafc-gotrue-http.entrypoints: http
+      traefik.http.routers.ntaafc-gotrue-http.middlewares: redirect-to-https
+    networks:
+      - coolify
+
+  # ── Martin (vector tiles) ──────────────────────────────────
+  martin:
+    image: ghcr.io/maplibre/martin:latest
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://geo_app:${SERVICE_PASSWORD_GEOAPP}@postgres:5432/ntaafc?sslmode=disable
+      FC_WEB_URL: https://${FC_WEB_HOST}
+      GEO_WEB_URL: https://${GEO_WEB_HOST}
+      FC_API_URL: https://${FC_API_HOST}
+      RUST_LOG: info
+    volumes:
+      - ./martin/config.coolify.yaml:/config/config.yaml:ro
+    command: ["--config", "/config/config.yaml"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      geo-migrate:
+        condition: service_completed_successfully
+    labels:
+      <<: *traefik-common
+      traefik.http.routers.ntaafc-martin.rule: Host(`${MARTIN_HOST}`)
+      traefik.http.routers.ntaafc-martin.entrypoints: https
+      traefik.http.routers.ntaafc-martin.tls: "true"
+      traefik.http.routers.ntaafc-martin.tls.certresolver: letsencrypt
+      traefik.http.routers.ntaafc-martin.service: ntaafc-martin
+      traefik.http.services.ntaafc-martin.loadbalancer.server.port: "3000"
+      traefik.http.routers.ntaafc-martin-http.rule: Host(`${MARTIN_HOST}`)
+      traefik.http.routers.ntaafc-martin-http.entrypoints: http
+      traefik.http.routers.ntaafc-martin-http.middlewares: redirect-to-https
+    networks:
+      - coolify
+
+  # ── Tippecanoe (internal only) ─────────────────────────────
+  tippecanoe:
+    build:
+      context: ../docker/tippecanoe
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - coolify
+
+  # ── Field Collector API (also used by mobile) ──────────────
+  fc-api:
+    build:
+      context: ..
+      dockerfile: docker/fc-api/Dockerfile
+    restart: unless-stopped
+    environment:
+      PORT: "5355"
+      ENV: production
+      DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-20}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-5}
+      DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-30m}
+      JWT_SECRET: ${SERVICE_PASSWORD_JWT}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://${FC_WEB_HOST},https://${GEO_WEB_HOST}}
+      S3_ENDPOINT: http://rustfs:9000
+      S3_PUBLIC_ENDPOINT: https://${S3_HOST}
+      S3_BUCKET: ${S3_BUCKET:-field-collector}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      S3_SECRET_KEY: ${SERVICE_PASSWORD_RUSTFS}
+      S3_USE_SSL: "false"
+      VALKEY_URL: redis://valkey:6379
+      GOTRUE_URL: http://gotrue:8081
+      TIPPECANOE_URL: http://tippecanoe:8080
+      AUTH_PROFILE_UPSERT_TTL: ${AUTH_PROFILE_UPSERT_TTL:-5m}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      geo-migrate:
+        condition: service_completed_successfully
+      valkey:
+        condition: service_healthy
+      rustfs:
+        condition: service_started
+      tippecanoe:
+        condition: service_healthy
+      gotrue:
+        condition: service_started
+    # distroless — no shell/curl; Traefik healthchecks /health below
+    labels:
+      <<: *traefik-common
+      traefik.http.routers.ntaafc-fc-api.rule: Host(`${FC_API_HOST}`)
+      traefik.http.routers.ntaafc-fc-api.entrypoints: https
+      traefik.http.routers.ntaafc-fc-api.tls: "true"
+      traefik.http.routers.ntaafc-fc-api.tls.certresolver: letsencrypt
+      traefik.http.routers.ntaafc-fc-api.service: ntaafc-fc-api
+      traefik.http.services.ntaafc-fc-api.loadbalancer.server.port: "5355"
+      traefik.http.services.ntaafc-fc-api.loadbalancer.healthcheck.path: /health
+      traefik.http.services.ntaafc-fc-api.loadbalancer.healthcheck.interval: 10s
+      traefik.http.routers.ntaafc-fc-api-http.rule: Host(`${FC_API_HOST}`)
+      traefik.http.routers.ntaafc-fc-api-http.entrypoints: http
+      traefik.http.routers.ntaafc-fc-api-http.middlewares: redirect-to-https
+    networks:
+      - coolify
+
+  # ── Geo API ────────────────────────────────────────────────
+  geo-api:
+    build:
+      context: ../services/geo-api
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: "5442"
+      API_ENV: production
+      API_LOG_LEVEL: info
+      DATABASE_URL: postgres://geo_app:${SERVICE_PASSWORD_GEOAPP}@postgres:5432/ntaafc?sslmode=disable
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-20}
+      DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-5}
+      DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-30m}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-https://${GEO_WEB_HOST},https://${FC_WEB_HOST}}
+      MARTIN_BASE_URL: https://${MARTIN_HOST}
+      JWT_SECRET: ${SERVICE_PASSWORD_JWT}
+      SUPERUSER_EMAIL: ${SUPERUSER_EMAIL:-admin@geo.local}
+      SUPERUSER_NAME: ${SUPERUSER_NAME:-Super Admin}
+      COOKIE_DOMAIN: ${GEO_WEB_HOST}
+      COOKIE_SECURE: "true"
+      S3_ENDPOINT: http://rustfs:9000
+      S3_PUBLIC_ENDPOINT: https://${S3_HOST}
+      S3_BUCKET: ${S3_BUCKET:-field-collector}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
+      S3_SECRET_KEY: ${SERVICE_PASSWORD_RUSTFS}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      geo-migrate:
+        condition: service_completed_successfully
+      gotrue:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5442/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - coolify
+
+  # ── Field Collector web ────────────────────────────────────
+  fc-web:
+    build:
+      context: ..
+      dockerfile: docker/fc-web/Dockerfile
+      args:
+        VITE_MARTIN_URL: https://${MARTIN_HOST}
+        VITE_GOTRUE_EXTERNAL_URL: https://${GOTRUE_HOST}
+    restart: unless-stopped
+    depends_on:
+      - fc-api
+      - gotrue
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      <<: *traefik-common
+      traefik.http.routers.ntaafc-fc-web.rule: Host(`${FC_WEB_HOST}`)
+      traefik.http.routers.ntaafc-fc-web.entrypoints: https
+      traefik.http.routers.ntaafc-fc-web.tls: "true"
+      traefik.http.routers.ntaafc-fc-web.tls.certresolver: letsencrypt
+      traefik.http.routers.ntaafc-fc-web.service: ntaafc-fc-web
+      traefik.http.services.ntaafc-fc-web.loadbalancer.server.port: "80"
+      traefik.http.routers.ntaafc-fc-web-http.rule: Host(`${FC_WEB_HOST}`)
+      traefik.http.routers.ntaafc-fc-web-http.entrypoints: http
+      traefik.http.routers.ntaafc-fc-web-http.middlewares: redirect-to-https
+    networks:
+      - coolify
+
+  # ── Geo web ────────────────────────────────────────────────
+  geo-web:
+    build:
+      context: ..
+      dockerfile: apps/geo-web/Dockerfile
+      args:
+        # Empty → same-origin /api via nginx → geo-api
+        VITE_API_URL: ""
+        VITE_MARTIN_URL: https://${MARTIN_HOST}
+        VITE_GOTRUE_EXTERNAL_URL: https://${GOTRUE_HOST}
+    restart: unless-stopped
+    depends_on:
+      geo-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    labels:
+      <<: *traefik-common
+      traefik.http.routers.ntaafc-geo-web.rule: Host(`${GEO_WEB_HOST}`)
+      traefik.http.routers.ntaafc-geo-web.entrypoints: https
+      traefik.http.routers.ntaafc-geo-web.tls: "true"
+      traefik.http.routers.ntaafc-geo-web.tls.certresolver: letsencrypt
+      traefik.http.routers.ntaafc-geo-web.service: ntaafc-geo-web
+      traefik.http.services.ntaafc-geo-web.loadbalancer.server.port: "80"
+      traefik.http.routers.ntaafc-geo-web-http.rule: Host(`${GEO_WEB_HOST}`)
+      traefik.http.routers.ntaafc-geo-web-http.entrypoints: http
+      traefik.http.routers.ntaafc-geo-web-http.middlewares: redirect-to-https
+    networks:
+      - coolify
+
+volumes:
+  coolify-pgdata:
+  coolify-valkeydata:
+  coolify-rustfsdata:
+
+networks:
+  coolify:
+    external: true
