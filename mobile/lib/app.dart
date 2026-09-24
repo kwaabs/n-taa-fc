@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'core/auth/auth_state.dart';
 import 'core/app_update.dart';
+import 'core/layout/orientation_lock.dart';
 import 'core/server_config.dart';
 import 'core/settings/settings_provider.dart';
 import 'core/theme.dart';
@@ -24,6 +25,11 @@ class FieldCollectorApp extends ConsumerWidget {
       themeMode: ref.watch(settingsProvider).value?.themeMode.toFlutter() ??
           ThemeMode.system,
       scaffoldMessengerKey: rootScaffoldMessengerKey,
+      builder: (context, child) {
+        return OrientationLockBinder(
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       home: const _Bootstrap(),
     );
   }

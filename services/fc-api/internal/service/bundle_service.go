@@ -390,12 +390,27 @@ type BundleJobView struct {
 }
 
 func (s *BundleService) GetJobStatus(ctx context.Context, jobID, userID uuid.UUID) (*BundleJobView, error) {
-	// Try Valkey first (hot path during active polling)
+	if !s.canViewJob(ctx, jobID, userID) {
+		return nil, fmt.Errorf("access denied")
+	}
+
+	// DB is source of truth for terminal / stale states; Valkey is the hot path.
+	job, dbErr := s.importJobRepo.FindByID(ctx, jobID)
+	if dbErr == nil && job.Status == "running" && job.StartedAt != nil {
+		if time.Since(*job.StartedAt) > 45*time.Minute {
+			msg := "pack generation timed out"
+			_ = s.importJobRepo.MarkFinished(ctx, jobID, "failed", nil, msg)
+			s.ReleaseJobDedupLock(ctx, job)
+			_ = s.cache.Del(ctx, s.jobStatusKey(jobID))
+			return &BundleJobView{JobID: jobID, Status: "failed", Error: msg}, nil
+		}
+	}
 
 	view := s.readJobViewFromCache(ctx, jobID)
 	if view != nil && view.Status != "" {
-		if !s.canViewJob(ctx, jobID, userID) {
-			return nil, fmt.Errorf("access denied")
+		if dbErr == nil && job.Status != view.Status {
+			view.Status = job.Status
+			view.Error = job.ErrorMessage
 		}
 		if view.Status == "success" && view.Result == nil {
 			view.Result = s.buildResultFromJob(ctx, jobID)
@@ -404,13 +419,8 @@ func (s *BundleService) GetJobStatus(ctx context.Context, jobID, userID uuid.UUI
 	}
 
 	// Fall back to DB
-	job, err := s.importJobRepo.FindByID(ctx, jobID)
-	if err != nil {
+	if dbErr != nil {
 		return nil, fmt.Errorf("job not found")
-	}
-	ok, err := s.accessSvc.CanAccess(ctx, userID, job.ProjectID)
-	if err != nil || !ok {
-		return nil, fmt.Errorf("access denied")
 	}
 
 	v := &BundleJobView{

@@ -95,6 +95,21 @@ func (s *BundleHashService) Compute(
 		Scan(ctx, &layersRow)
 	seedParts = append(seedParts, fmt.Sprintf("layers:%s", tsStr(layersRow.Ts)))
 
+	// 3b. Shared geo style for linked dbo layers (app.layers). Style edits
+	// historically only touched app.layers; include that timestamp so core
+	// packs invalidate even if public.layers.updated_at was not bumped.
+	var appStyleRow tsRow
+	_ = s.db.NewSelect().
+		TableExpr("app.layers AS al").
+		ColumnExpr("MAX(al.updated_at) AS ts").
+		Join(`JOIN layers AS l ON l.source_type = 'linked_table'
+			AND l.status = 'published'
+			AND l.project_id = ?
+			AND l.source_config->>'schema' = al.schema_name
+			AND l.source_config->>'table' = al.table_name`, projectID).
+		Scan(ctx, &appStyleRow)
+	seedParts = append(seedParts, fmt.Sprintf("app_layers_style:%s", tsStr(appStyleRow.Ts)))
+
 	// 4. Choice lists
 	var clRow tsRow
 	_ = s.db.NewSelect().
@@ -188,7 +203,7 @@ func (s *BundleHashService) ComputeLayerRef(
 	}
 
 	var seedParts []string
-	const LayerRefFormatVersion = "v1-layer-ref"
+	const LayerRefFormatVersion = "v7-fc-ref-no-drop"
 
 	seedParts = append(seedParts, fmt.Sprintf("fmt:%s", LayerRefFormatVersion))
 	seedParts = append(seedParts, fmt.Sprintf("layer:%s", layerID))

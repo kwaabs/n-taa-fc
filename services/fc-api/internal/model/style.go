@@ -100,6 +100,24 @@ func (s *LayerStyle) Validate() error {
 	if s.Label != nil && s.Label.Field == "" {
 		return fmt.Errorf("label: field is required when label section is present")
 	}
+	if s.Visibility != nil {
+		if err := s.Visibility.Validate(); err != nil {
+			return fmt.Errorf("visibility: %w", err)
+		}
+	}
+	return nil
+}
+
+func (v *Visibility) Validate() error {
+	if v.MinZoom != nil && (*v.MinZoom < 0 || *v.MinZoom > 24) {
+		return fmt.Errorf("min_zoom must be 0-24, got %v", *v.MinZoom)
+	}
+	if v.MaxZoom != nil && (*v.MaxZoom < 0 || *v.MaxZoom > 24) {
+		return fmt.Errorf("max_zoom must be 0-24, got %v", *v.MaxZoom)
+	}
+	if v.MinZoom != nil && v.MaxZoom != nil && *v.MinZoom > *v.MaxZoom {
+		return fmt.Errorf("min_zoom (%v) cannot be greater than max_zoom (%v)", *v.MinZoom, *v.MaxZoom)
+	}
 	return nil
 }
 

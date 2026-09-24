@@ -121,3 +121,29 @@ export interface StyleProps {
     if (!style?.visibility) return true;
     return style.visibility.visible_by_default !== false;
   }
+
+  /** MapLibre layer zoom range from style.visibility (inclusive min, exclusive max). */
+  export function layerZoomRange(style: LayerStyle | null | undefined): {
+    minzoom: number;
+    maxzoom: number;
+  } {
+    const v = style?.visibility;
+    let minzoom = typeof v?.min_zoom === "number" ? v.min_zoom : 0;
+    let maxzoom = typeof v?.max_zoom === "number" ? v.max_zoom : 22;
+    if (minzoom < 0) minzoom = 0;
+    if (maxzoom > 24) maxzoom = 24;
+    if (minzoom > maxzoom) {
+      const t = minzoom;
+      minzoom = maxzoom;
+      maxzoom = t;
+    }
+    return { minzoom, maxzoom };
+  }
+
+  export function isMapZoomInLayerRange(
+    zoom: number,
+    style: LayerStyle | null | undefined,
+  ): boolean {
+    const { minzoom, maxzoom } = layerZoomRange(style);
+    return zoom >= minzoom && zoom < maxzoom;
+  }

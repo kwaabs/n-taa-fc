@@ -8,8 +8,11 @@
 
 const SYSTEM_EXACT = new Set<string>([
     "objectid",
+    "object_id",
     "globalid",
+    "global_id",
     "ogc_fid",
+    "fid",
     "created_at",
     "updated_at",
     "created_user",
@@ -23,6 +26,9 @@ const SYSTEM_EXACT = new Set<string>([
     "unique_id_hidden",
     "shape_length",
     "shape_area",
+    "geometry",
+    "geom",
+    "the_geom",
   ]);
   
   const SYSTEM_PREFIXES = ["_", "shape_", "geom_"];

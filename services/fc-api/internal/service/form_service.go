@@ -52,7 +52,7 @@ func (s *FormService) Create(ctx context.Context, userID, projectID uuid.UUID, n
 		for _, ve := range validationErrors {
 			errMsg += fmt.Sprintf(" [%s: %s]", ve.FieldID, ve.Message)
 		}
-		return nil, fmt.Errorf(errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	form := &model.Form{
@@ -129,7 +129,7 @@ func (s *FormService) Update(ctx context.Context, formID, userID uuid.UUID, name
 			for _, ve := range validationErrors {
 				errMsg += fmt.Sprintf(" [%s: %s]", ve.FieldID, ve.Message)
 			}
-			return nil, fmt.Errorf(errMsg)
+			return nil, fmt.Errorf("%s", errMsg)
 		}
 		form.Schema = *schema
 		form.Version++
@@ -143,6 +143,24 @@ func (s *FormService) Update(ctx context.Context, formID, userID uuid.UUID, name
 		return nil, fmt.Errorf("failed to update form: %w", err)
 	}
 	return form, nil
+}
+
+// PublishLatestDraft publishes the form's current version when it is still a draft.
+// No-op when that version is already published (nothing pending for mobile).
+func (s *FormService) PublishLatestDraft(ctx context.Context, formID, userID uuid.UUID) error {
+	form, err := s.formRepo.FindByID(ctx, formID)
+	if err != nil {
+		return fmt.Errorf("form not found")
+	}
+	fv, err := s.formRepo.FindVersionByFormAndVersion(ctx, formID, form.Version)
+	if err != nil {
+		return fmt.Errorf("form version %d not found", form.Version)
+	}
+	if !fv.IsDraft {
+		return nil
+	}
+	_, err = s.Publish(ctx, formID, userID, form.Version)
+	return err
 }
 
 func (s *FormService) Publish(ctx context.Context, formID, userID uuid.UUID, version int) (*model.FormVersion, error) {
@@ -256,7 +274,7 @@ func (s *FormService) CloneIntoProject(
 		for _, ve := range validationErrors {
 			errMsg += fmt.Sprintf(" [%s: %s]", ve.FieldID, ve.Message)
 		}
-		return nil, fmt.Errorf(errMsg)
+		return nil, fmt.Errorf("%s", errMsg)
 	}
 
 	name := nameOverride

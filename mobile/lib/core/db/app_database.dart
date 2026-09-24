@@ -68,6 +68,9 @@ class Layers extends Table {
   BoolColumn get isEditable =>
       boolean().withDefault(const Constant(true))();
 
+  /// Linked-table source_config JSON — used for offline search attribute discovery.
+  TextColumn get sourceConfig => text().nullable()();
+
   DateTimeColumn get downloadedAt =>
       dateTime().withDefault(currentDateAndTime)();
 
@@ -265,7 +268,7 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase.forUser(String userId) : super(_openConnection(userId));
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -319,6 +322,10 @@ class AppDatabase extends _$AppDatabase {
           if (from < 8) {
             await _safeAddColumn(m, layers, layers.isEditable);
             await _safeAddColumn(m, projects, projects.aoiLayerId);
+          }
+          // v8 → v9: layer source_config for offline search attribute discovery
+          if (from < 9) {
+            await _safeAddColumn(m, layers, layers.sourceConfig);
           }
         },
       );

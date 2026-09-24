@@ -41,6 +41,8 @@ type Config struct {
 	ValkeyPass       string
 	ValkeyDB         int
 	GoTrueURL        string
+	// OSRMBaseURL is the OSRM-compatible routing API (self-hosted recommended).
+	OSRMBaseURL string
 	// AuthProfileUpsertTTL skips profile upserts when a recent cache hit exists.
 	AuthProfileUpsertTTL time.Duration
 }
@@ -66,6 +68,7 @@ func Load() *Config {
 		ValkeyURL:            getEnv("VALKEY_URL", "redis://localhost:5351"),
 		ValkeyPass:           getEnv("VALKEY_PASSWORD", ""),
 		GoTrueURL:            getEnv("GOTRUE_URL", "http://localhost:5354"),
+		OSRMBaseURL:          getEnv("OSRM_BASE_URL", "https://router.project-osrm.org"),
 		AuthProfileUpsertTTL: getEnvDuration("AUTH_PROFILE_UPSERT_TTL", 5*time.Minute),
 	}
 }

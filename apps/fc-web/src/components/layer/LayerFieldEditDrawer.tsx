@@ -50,7 +50,7 @@ export function LayerFieldEditDrawer({
       queryClient.invalidateQueries({ queryKey: ["form", form.id] });
       queryClient.invalidateQueries({ queryKey: ["layer"] });
       toast.success("Field saved", {
-        description: "Publish the layer to push changes to mobile.",
+        description: "Publish the layer to push field + form changes to mobile.",
       });
       onClose();
     },

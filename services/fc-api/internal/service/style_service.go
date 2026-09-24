@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
@@ -56,7 +57,14 @@ func (s *StyleService) UpdateStyle(ctx context.Context, layerID, userID uuid.UUI
 		if err != nil {
 			return nil, err
 		}
+		// Cache resolved FC style on public.layers and bump updated_at so
+		// core-pack hashes invalidate and mobile offline downloads pick up
+		// color/size/icon changes (app.layers alone was not hashed before).
 		layer.Style = raw
+		layer.UpdatedAt = time.Now()
+		if err := s.layerRepo.Update(ctx, layer); err != nil {
+			return nil, fmt.Errorf("failed to sync linked style to layer row: %w", err)
+		}
 		return layer, nil
 	}
 

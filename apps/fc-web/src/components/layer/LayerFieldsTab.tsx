@@ -48,15 +48,20 @@ export function LayerFieldsTab({ projectId, layerId, formId }: Props) {
       queryClient.setQueryData(["layer", layerId], updated);
       queryClient.invalidateQueries({ queryKey: ["layer", layerId] });
       queryClient.invalidateQueries({ queryKey: ["layers", projectId] });
+      const fid = updated.form_id ?? effectiveFormId;
+      if (fid) {
+        queryClient.invalidateQueries({ queryKey: ["form", fid] });
+        queryClient.invalidateQueries({ queryKey: ["formVersions", fid] });
+      }
     },
   });
 
-  // Linked layers imported before form generation: backfill once.
+  // Linked layers: create a form if missing, and ensure the optional Photos
+  // field exists on existing auto-generated forms.
   useEffect(() => {
     if (
       !layerLoading &&
       isLinked &&
-      !effectiveFormId &&
       !ensureAttempted &&
       !ensureMutation.isPending &&
       !ensureMutation.isError
@@ -64,8 +69,8 @@ export function LayerFieldsTab({ projectId, layerId, formId }: Props) {
       setEnsureAttempted(true);
       ensureMutation.mutate();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once when layer loads without form
-  }, [layerLoading, isLinked, effectiveFormId, ensureAttempted]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- run once when linked layer loads
+  }, [layerLoading, isLinked, ensureAttempted]);
 
   const { data: form, isLoading, error } = useQuery({
     queryKey: ["form", effectiveFormId],

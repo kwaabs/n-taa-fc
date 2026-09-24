@@ -59,19 +59,37 @@ class ResponsiveLayout extends StatelessWidget {
 class LayoutOf {
   final LayoutSize size;
   final double width;
+  final double shortestSide;
+  final Orientation orientation;
 
-  LayoutOf._(this.size, this.width);
+  LayoutOf._(this.size, this.width, this.shortestSide, this.orientation);
 
   factory LayoutOf(BuildContext context) {
-    final w = MediaQuery.of(context).size.width;
-    return LayoutOf._(Breakpoints.categorize(w), w);
+    final mq = MediaQuery.of(context);
+    final size = mq.size;
+    return LayoutOf._(
+      Breakpoints.categorize(size.width),
+      size.width,
+      size.shortestSide,
+      mq.orientation,
+    );
   }
 
   bool get isPhone => size == LayoutSize.phone;
   bool get isTabletPortrait => size == LayoutSize.tabletPortrait;
   bool get isTabletLandscape => size == LayoutSize.tabletLandscape;
   bool get isWideTablet => size == LayoutSize.wideTablet;
+
+  /// Width-based "large tablet landscape" (legacy; prefers ≥900dp width).
   bool get isAtLeastTablet =>
-      size == LayoutSize.tabletLandscape ||
-      size == LayoutSize.wideTablet;
+      size == LayoutSize.tabletLandscape || size == LayoutSize.wideTablet;
+
+  /// Device is a tablet-class form factor (incl. compact 8" tablets).
+  bool get isTabletDevice => Breakpoints.isTabletDevice(shortestSide);
+
+  /// Map / multi-pane chrome: tablet device held (or locked) in landscape.
+  /// Prefer this over [isAtLeastTablet] for map side panels — Tab Active 2
+  /// landscape width is often only ~850dp, below the 900 width bucket.
+  bool get useTabletMapChrome =>
+      isTabletDevice && orientation == Orientation.landscape;
 }

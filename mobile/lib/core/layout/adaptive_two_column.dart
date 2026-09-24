@@ -15,6 +15,9 @@ class AdaptiveTwoColumn extends StatelessWidget {
   final double leftFlex;
   final double rightFlex;
 
+  /// When true, always stack (e.g. form embedded in a narrow side panel).
+  final bool forceStacked;
+
   const AdaptiveTwoColumn({
     super.key,
     required this.left,
@@ -22,12 +25,14 @@ class AdaptiveTwoColumn extends StatelessWidget {
     this.gap = 16,
     this.leftFlex = 1,
     this.rightFlex = 1,
+    this.forceStacked = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final layout = LayoutOf(context);
-    final useTwoColumns = layout.isTabletLandscape || layout.isWideTablet;
+    final useTwoColumns = !forceStacked &&
+        (layout.isTabletLandscape || layout.isWideTablet);
 
     if (!useTwoColumns) {
       // Phone / tablet portrait — stacked

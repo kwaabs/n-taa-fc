@@ -4,7 +4,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'notification_repository.dart';
 import 'notification_inbox.dart';
 
+/// Dismiss any notification SnackBar and clear the pending alert flag.
+void dismissNotificationSnackBar(WidgetRef ref) {
+  rootScaffoldMessengerKey.currentState?.clearSnackBars();
+  ref.read(notificationInboxProvider.notifier).clearPendingAlert();
+}
+
 Future<void> showNotificationsSheet(BuildContext context, WidgetRef ref) {
+  dismissNotificationSnackBar(ref);
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,

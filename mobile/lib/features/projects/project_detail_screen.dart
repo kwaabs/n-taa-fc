@@ -13,6 +13,7 @@ import '../../core/layout/adaptive_two_column.dart';
 import '../collection/collected_features_section.dart';
 import '../sync/sync_service.dart';
 import '../map/map_project_screen.dart';
+import '../map/map_providers.dart';
 import 'bundle_downloader.dart';
 import 'bundle_repository.dart';
 import 'form_detail_screen.dart';
@@ -43,6 +44,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
   String? _statusMessage;
   /// When true, use legacy single full bundle instead of core + layer packs.
   bool _useLegacyFullBundle = false;
+  bool _downloadAllMapLayers = false;
 
   @override
   void initState() {
@@ -116,6 +118,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
       final outcome = await downloader.downloadEfficient(
         project: widget.project,
         repo: repo,
+        downloadReferencePacks: _downloadAllMapLayers,
         onProgress: (p) {
           if (!mounted) return;
           setState(() {
@@ -291,6 +294,7 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
     ref.invalidate(assignmentsForProjectProvider(widget.project.id));
     ref.invalidate(projectDownloadedAtProvider(widget.project.id));
     ref.invalidate(referenceFeatureCountProvider(widget.project.id));
+    invalidateProjectMapProviders(ref.invalidate, widget.project.id);
     await Future.delayed(const Duration(milliseconds: 300));
     await _recoverSyncState();
   }
@@ -440,13 +444,24 @@ class _ProjectDetailScreenState extends ConsumerState<ProjectDetailScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Downloads project setup first, then map reference data per layer.',
+              'Downloads project setup (forms, layers catalog, assignments). '
+              'Map tiles download when you open the map (or enable below).',
               style: theme.textTheme.bodySmall?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
             const SizedBox(height: 16),
             if (_stage == _BundleStage.idle) ...[
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Also download all map layers now'),
+                subtitle: const Text(
+                  'Only for small projects. Large projects should download '
+                  'layers on the map.',
+                ),
+                value: _downloadAllMapLayers,
+                onChanged: (v) => setState(() => _downloadAllMapLayers = v),
+              ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Legacy full bundle'),

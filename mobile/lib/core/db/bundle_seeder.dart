@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:drift/drift.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -9,6 +8,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
 import 'app_database.dart';
+import 'bundle_zip_decode.dart';
 import 'db_provider.dart';
 
 class SeedResult {
@@ -60,47 +60,44 @@ class BundleSeeder {
     required String projectId,
     required Uint8List zipBytes,
   }) async {
-    final archive = ZipDecoder().decodeBytes(zipBytes);
+    final files = await compute(decodeZipEntries, zipBytes);
 
-    // Build a quick map of path -> bytes for fast lookup
-    final files = <String, Uint8List>{};
-    for (final file in archive.files) {
-      if (file.isFile) {
-        files[file.name] = file.content as Uint8List;
-      }
-    }
-
-    // ── Extract reference_tiles/*.mbtiles to disk BEFORE the transaction ──
-    // Wipe the project mbtiles dir first so removed/failed layers cannot leave
-    // stale tiles that force the offline map onto an outdated path.
+    // ── Extract reference_tiles/*.mbtiles when the pack includes them ──
+    // Core packs have no tiles — never wipe existing per-layer mbtiles on disk.
     int tileCount = 0;
+    final tilePaths = files.keys
+        .where(
+          (path) =>
+              path.startsWith('reference_tiles/') && path.endsWith('.mbtiles'),
+        )
+        .toList();
     try {
-      final docs = await getApplicationDocumentsDirectory();
-      final tileDir = Directory(p.join(docs.path, 'mbtiles', projectId));
-      if (await tileDir.exists()) {
-        await tileDir.delete(recursive: true);
-      }
-      await tileDir.create(recursive: true);
+      if (tilePaths.isEmpty) {
+        debugPrint(
+          '[bundle_seeder] core seed — preserving existing mbtiles on disk',
+        );
+      } else {
+        final docs = await getApplicationDocumentsDirectory();
+        final tileDir = Directory(p.join(docs.path, 'mbtiles', projectId));
+        await tileDir.create(recursive: true);
 
-      for (final path in files.keys) {
-        if (!path.startsWith('reference_tiles/') || !path.endsWith('.mbtiles')) {
-          continue;
-        }
-        final layerId = path
-            .substring('reference_tiles/'.length)
-            .replaceAll(RegExp(r'\.mbtiles$'), '');
-        final bytes = files[path];
-        if (bytes == null || bytes.isEmpty) continue;
+        for (final path in tilePaths) {
+          final layerId = path
+              .substring('reference_tiles/'.length)
+              .replaceAll(RegExp(r'\.mbtiles$'), '');
+          final bytes = files[path];
+          if (bytes == null || bytes.isEmpty) continue;
 
-        try {
-          final tileFile = File(p.join(tileDir.path, '$layerId.mbtiles'));
-          await tileFile.writeAsBytes(bytes, flush: true);
-          debugPrint('[bundle_seeder] wrote mbtiles layer=$layerId '
-              '(${bytes.length} bytes) to ${tileFile.path}');
-          tileCount++;
-        } catch (e) {
-          debugPrint('[bundle_seeder] failed to write mbtiles for '
-              'layer $layerId: $e');
+          try {
+            final tileFile = File(p.join(tileDir.path, '$layerId.mbtiles'));
+            await tileFile.writeAsBytes(bytes, flush: true);
+            debugPrint('[bundle_seeder] wrote mbtiles layer=$layerId '
+                '(${bytes.length} bytes) to ${tileFile.path}');
+            tileCount++;
+          } catch (e) {
+            debugPrint('[bundle_seeder] failed to write mbtiles for '
+                'layer $layerId: $e');
+          }
         }
       }
     } catch (e) {
@@ -219,6 +216,9 @@ class BundleSeeder {
                 // 👇 D1.0: pulled from D1.0 bundle backend (data_source_id)
                 dataSourceId: Value(layer['data_source_id']?.toString()),
                 isEditable: Value(layer['is_editable'] != false),
+                sourceConfig: layer['source_config'] != null
+                    ? Value(jsonEncode(layer['source_config']))
+                    : const Value.absent(),
               ),
             );
         layerCount++;
@@ -337,15 +337,10 @@ class BundleSeeder {
     required String layerId,
     required Uint8List zipBytes,
   }) async {
-    final archive = ZipDecoder().decodeBytes(zipBytes);
-    final files = <String, Uint8List>{};
-    for (final file in archive.files) {
-      if (file.isFile) {
-        files[file.name] = file.content as Uint8List;
-      }
-    }
+    final files = await compute(decodeZipEntries, zipBytes);
 
     final warnings = <String>[];
+    var tilesOnly = false;
     final manifestBytes = files['manifest.json'];
     if (manifestBytes != null) {
       try {
@@ -356,6 +351,7 @@ class BundleSeeder {
             warnings.add(w.toString());
           }
         }
+        tilesOnly = manifest['tiles_only'] == true;
       } catch (_) {
         // ignore malformed manifest warnings
       }
@@ -400,62 +396,206 @@ class BundleSeeder {
       debugPrint('[bundle_seeder] merge mbtiles failed: $e');
     }
 
-    int refCount = 0;
-    await _db.transaction(() async {
+    final geoPath = 'reference_features/$resolvedLayerId.geojson';
+    final geoBytes = files.remove(geoPath);
+    final searchPath = 'reference_search/$resolvedLayerId.ndjson';
+    final searchBytes = files[searchPath];
+    // Release zip payload early — tiles already written.
+    files.clear();
+
+    var refCount = 0;
+    if (searchBytes != null && searchBytes.isNotEmpty) {
+      refCount = await _seedReferenceSearchNdjson(
+        projectId: projectId,
+        layerId: resolvedLayerId,
+        ndjsonBytes: searchBytes,
+      );
+      debugPrint(
+        '[bundle_seeder] search index layer=$resolvedLayerId features=$refCount',
+      );
+    }
+
+    // Tiles-only packs: mbtiles carry geometry+attrs for the map. Do not flood
+    // SQLite with hundreds of thousands of reference rows unless we have a
+    // compact search index for the query builder.
+    final skipSqliteGeoms = tilesOnly || _geojsonIsTilesOnlyStub(geoBytes);
+    if (refCount > 0) {
+      return (
+        referenceFeatures: refCount,
+        referenceTiles: tileCount,
+        warnings: warnings,
+      );
+    }
+
+    if (skipSqliteGeoms && tileCount > 0) {
       await (_db.delete(_db.referenceFeatures)
             ..where((t) =>
                 t.projectId.equals(projectId) &
                 t.layerId.equals(resolvedLayerId)))
           .go();
+      warnings.add(
+        'Layer $resolvedLayerId seeded tiles-only (no offline search index). '
+        'Re-download the layer pack after updating the server.',
+      );
+      return (
+        referenceFeatures: 0,
+        referenceTiles: tileCount,
+        warnings: warnings,
+      );
+    }
 
-      final geoPath = 'reference_features/$resolvedLayerId.geojson';
-      final geoBytes = files[geoPath];
-      if (geoBytes == null) return;
+    // Legacy full GeoJSON packs (non tiles-only).
+    if (geoBytes != null && geoBytes.isNotEmpty && !skipSqliteGeoms) {
+      refCount = await _seedReferenceGeoJsonBytes(
+        projectId: projectId,
+        layerId: resolvedLayerId,
+        geoBytes: geoBytes,
+      );
+    } else {
+      await (_db.delete(_db.referenceFeatures)
+            ..where((t) =>
+                t.projectId.equals(projectId) &
+                t.layerId.equals(resolvedLayerId)))
+          .go();
+    }
 
-      Map<String, dynamic>? fc;
-      try {
-        fc = jsonDecode(utf8.decode(geoBytes)) as Map<String, dynamic>;
-      } catch (_) {
-        return;
-      }
-
-      final featureArr = fc['features'];
-      if (featureArr is! List) return;
-
-      for (final f in featureArr) {
-        if (f is! Map) continue;
-        final rawId = f['id']?.toString();
-        if (rawId == null || rawId.isEmpty) continue;
-
-        final geom = f['geometry'];
-        final props = f['properties'] is Map
-            ? Map<String, dynamic>.from(f['properties'] as Map)
-            : <String, dynamic>{};
-
-        final sourceRef = props.remove('_source_ref')?.toString() ?? rawId;
-        final dataSourceId = props.remove('_data_source_id')?.toString();
-        final featureId = '$resolvedLayerId:$rawId';
-
-        await _db.into(_db.referenceFeatures).insert(
-              ReferenceFeaturesCompanion.insert(
-                id: featureId,
-                projectId: projectId,
-                layerId: resolvedLayerId,
-                geometry: jsonEncode(geom),
-                attributes: jsonEncode(props),
-                sourceRef: Value(sourceRef),
-                dataSourceId: Value(dataSourceId),
-              ),
-            );
-        refCount++;
-      }
-    });
-
+    if (tileCount == 0 && refCount == 0) {
+      warnings.add(
+        'Layer $resolvedLayerId has no mbtiles — it will not appear on the '
+        'map until tile generation succeeds on the server.',
+      );
+    }
     return (
       referenceFeatures: refCount,
       referenceTiles: tileCount,
       warnings: warnings,
     );
+  }
+
+  Future<int> _seedReferenceSearchNdjson({
+    required String projectId,
+    required String layerId,
+    required Uint8List ndjsonBytes,
+  }) async {
+    await (_db.delete(_db.referenceFeatures)
+          ..where((t) =>
+              t.projectId.equals(projectId) & t.layerId.equals(layerId)))
+        .go();
+
+    var count = 0;
+    final text = utf8.decode(ndjsonBytes);
+    final companions = <ReferenceFeaturesCompanion>[];
+    for (final line in const LineSplitter().convert(text)) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) continue;
+      Map<String, dynamic> f;
+      try {
+        final parsed = jsonDecode(trimmed);
+        if (parsed is! Map) continue;
+        f = Map<String, dynamic>.from(parsed);
+      } catch (_) {
+        continue;
+      }
+
+      final rawId = f['id']?.toString();
+      if (rawId == null || rawId.isEmpty) continue;
+
+      final geom = f['geometry'];
+      final props = f['properties'] is Map
+          ? Map<String, dynamic>.from(f['properties'] as Map)
+          : <String, dynamic>{};
+
+      final sourceRef = props.remove('_source_ref')?.toString() ?? rawId;
+      final dataSourceId = props.remove('_data_source_id')?.toString();
+      final featureId = '$layerId:$rawId';
+
+      companions.add(
+        ReferenceFeaturesCompanion.insert(
+          id: featureId,
+          projectId: projectId,
+          layerId: layerId,
+          geometry: jsonEncode(geom),
+          attributes: jsonEncode(props),
+          sourceRef: Value(sourceRef),
+          dataSourceId: Value(dataSourceId),
+        ),
+      );
+    }
+
+    if (companions.isNotEmpty) {
+      await _db.batch((batch) {
+        batch.insertAll(_db.referenceFeatures, companions);
+      });
+      count = companions.length;
+    }
+    return count;
+  }
+
+  Future<int> _seedReferenceGeoJsonBytes({
+    required String projectId,
+    required String layerId,
+    required Uint8List geoBytes,
+  }) async {
+    await (_db.delete(_db.referenceFeatures)
+          ..where((t) =>
+              t.projectId.equals(projectId) & t.layerId.equals(layerId)))
+        .go();
+
+    var count = 0;
+    try {
+      final fc = jsonDecode(utf8.decode(geoBytes));
+      if (fc is! Map) return 0;
+      final featureArr = fc['features'];
+      if (featureArr is! List) return 0;
+
+      await _db.transaction(() async {
+        for (final f in featureArr) {
+          if (f is! Map) continue;
+          final rawId = f['id']?.toString();
+          if (rawId == null || rawId.isEmpty) continue;
+
+          final geom = f['geometry'];
+          final props = f['properties'] is Map
+              ? Map<String, dynamic>.from(f['properties'] as Map)
+              : <String, dynamic>{};
+
+          final sourceRef = props.remove('_source_ref')?.toString() ?? rawId;
+          final dataSourceId = props.remove('_data_source_id')?.toString();
+          final featureId = '$layerId:$rawId';
+
+          await _db.into(_db.referenceFeatures).insert(
+                ReferenceFeaturesCompanion.insert(
+                  id: featureId,
+                  projectId: projectId,
+                  layerId: layerId,
+                  geometry: jsonEncode(geom),
+                  attributes: jsonEncode(props),
+                  sourceRef: Value(sourceRef),
+                  dataSourceId: Value(dataSourceId),
+                ),
+              );
+          count++;
+        }
+      });
+    } catch (e) {
+      debugPrint('[bundle_seeder] geojson seed failed: $e');
+    }
+    return count;
+  }
+
+  bool _geojsonIsTilesOnlyStub(Uint8List? geoBytes) {
+    if (geoBytes == null || geoBytes.isEmpty) return true;
+    try {
+      final fc = jsonDecode(utf8.decode(geoBytes));
+      if (fc is! Map) return false;
+      if (fc['fc_meta'] is Map && fc['fc_meta']['tiles_only'] == true) {
+        return true;
+      }
+      final features = fc['features'];
+      return features is List && features.isEmpty;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Layers to pull reference packs for: assignment targets, else all local layers.

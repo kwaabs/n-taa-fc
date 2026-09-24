@@ -1153,6 +1153,12 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
       defaultConstraints:
           GeneratedColumn.constraintIsAlways('CHECK ("is_editable" IN (0, 1))'),
       defaultValue: const Constant(true));
+  static const VerificationMeta _sourceConfigMeta =
+      const VerificationMeta('sourceConfig');
+  @override
+  late final GeneratedColumn<String> sourceConfig = GeneratedColumn<String>(
+      'source_config', aliasedName, true,
+      type: DriftSqlType.string, requiredDuringInsert: false);
   static const VerificationMeta _downloadedAtMeta =
       const VerificationMeta('downloadedAt');
   @override
@@ -1171,6 +1177,7 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
         style,
         dataSourceId,
         isEditable,
+        sourceConfig,
         downloadedAt
       ];
   @override
@@ -1228,6 +1235,12 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
           isEditable.isAcceptableOrUnknown(
               data['is_editable']!, _isEditableMeta));
     }
+    if (data.containsKey('source_config')) {
+      context.handle(
+          _sourceConfigMeta,
+          sourceConfig.isAcceptableOrUnknown(
+              data['source_config']!, _sourceConfigMeta));
+    }
     if (data.containsKey('downloaded_at')) {
       context.handle(
           _downloadedAtMeta,
@@ -1259,6 +1272,8 @@ class $LayersTable extends Layers with TableInfo<$LayersTable, Layer> {
           .read(DriftSqlType.string, data['${effectivePrefix}data_source_id']),
       isEditable: attachedDatabase.typeMapping
           .read(DriftSqlType.bool, data['${effectivePrefix}is_editable'])!,
+      sourceConfig: attachedDatabase.typeMapping
+          .read(DriftSqlType.string, data['${effectivePrefix}source_config']),
       downloadedAt: attachedDatabase.typeMapping.read(
           DriftSqlType.dateTime, data['${effectivePrefix}downloaded_at'])!,
     );
@@ -1284,6 +1299,9 @@ class Layer extends DataClass implements Insertable<Layer> {
 
   /// Mirrors server `layers.is_editable`. AOI source layers are false.
   final bool isEditable;
+
+  /// Linked-table source_config JSON — used for offline search attribute discovery.
+  final String? sourceConfig;
   final DateTime downloadedAt;
   const Layer(
       {required this.id,
@@ -1294,6 +1312,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       this.style,
       this.dataSourceId,
       required this.isEditable,
+      this.sourceConfig,
       required this.downloadedAt});
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1312,6 +1331,9 @@ class Layer extends DataClass implements Insertable<Layer> {
       map['data_source_id'] = Variable<String>(dataSourceId);
     }
     map['is_editable'] = Variable<bool>(isEditable);
+    if (!nullToAbsent || sourceConfig != null) {
+      map['source_config'] = Variable<String>(sourceConfig);
+    }
     map['downloaded_at'] = Variable<DateTime>(downloadedAt);
     return map;
   }
@@ -1330,6 +1352,9 @@ class Layer extends DataClass implements Insertable<Layer> {
           ? const Value.absent()
           : Value(dataSourceId),
       isEditable: Value(isEditable),
+      sourceConfig: sourceConfig == null && nullToAbsent
+          ? const Value.absent()
+          : Value(sourceConfig),
       downloadedAt: Value(downloadedAt),
     );
   }
@@ -1346,6 +1371,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       style: serializer.fromJson<String?>(json['style']),
       dataSourceId: serializer.fromJson<String?>(json['dataSourceId']),
       isEditable: serializer.fromJson<bool>(json['isEditable']),
+      sourceConfig: serializer.fromJson<String?>(json['sourceConfig']),
       downloadedAt: serializer.fromJson<DateTime>(json['downloadedAt']),
     );
   }
@@ -1361,6 +1387,7 @@ class Layer extends DataClass implements Insertable<Layer> {
       'style': serializer.toJson<String?>(style),
       'dataSourceId': serializer.toJson<String?>(dataSourceId),
       'isEditable': serializer.toJson<bool>(isEditable),
+      'sourceConfig': serializer.toJson<String?>(sourceConfig),
       'downloadedAt': serializer.toJson<DateTime>(downloadedAt),
     };
   }
@@ -1374,6 +1401,7 @@ class Layer extends DataClass implements Insertable<Layer> {
           Value<String?> style = const Value.absent(),
           Value<String?> dataSourceId = const Value.absent(),
           bool? isEditable,
+          Value<String?> sourceConfig = const Value.absent(),
           DateTime? downloadedAt}) =>
       Layer(
         id: id ?? this.id,
@@ -1385,6 +1413,8 @@ class Layer extends DataClass implements Insertable<Layer> {
         dataSourceId:
             dataSourceId.present ? dataSourceId.value : this.dataSourceId,
         isEditable: isEditable ?? this.isEditable,
+        sourceConfig:
+            sourceConfig.present ? sourceConfig.value : this.sourceConfig,
         downloadedAt: downloadedAt ?? this.downloadedAt,
       );
   Layer copyWithCompanion(LayersCompanion data) {
@@ -1402,6 +1432,9 @@ class Layer extends DataClass implements Insertable<Layer> {
           : this.dataSourceId,
       isEditable:
           data.isEditable.present ? data.isEditable.value : this.isEditable,
+      sourceConfig: data.sourceConfig.present
+          ? data.sourceConfig.value
+          : this.sourceConfig,
       downloadedAt: data.downloadedAt.present
           ? data.downloadedAt.value
           : this.downloadedAt,
@@ -1419,6 +1452,7 @@ class Layer extends DataClass implements Insertable<Layer> {
           ..write('style: $style, ')
           ..write('dataSourceId: $dataSourceId, ')
           ..write('isEditable: $isEditable, ')
+          ..write('sourceConfig: $sourceConfig, ')
           ..write('downloadedAt: $downloadedAt')
           ..write(')'))
         .toString();
@@ -1426,7 +1460,7 @@ class Layer extends DataClass implements Insertable<Layer> {
 
   @override
   int get hashCode => Object.hash(id, projectId, name, geometryType, formId,
-      style, dataSourceId, isEditable, downloadedAt);
+      style, dataSourceId, isEditable, sourceConfig, downloadedAt);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -1439,6 +1473,7 @@ class Layer extends DataClass implements Insertable<Layer> {
           other.style == this.style &&
           other.dataSourceId == this.dataSourceId &&
           other.isEditable == this.isEditable &&
+          other.sourceConfig == this.sourceConfig &&
           other.downloadedAt == this.downloadedAt);
 }
 
@@ -1451,6 +1486,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
   final Value<String?> style;
   final Value<String?> dataSourceId;
   final Value<bool> isEditable;
+  final Value<String?> sourceConfig;
   final Value<DateTime> downloadedAt;
   final Value<int> rowid;
   const LayersCompanion({
@@ -1462,6 +1498,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     this.style = const Value.absent(),
     this.dataSourceId = const Value.absent(),
     this.isEditable = const Value.absent(),
+    this.sourceConfig = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
@@ -1474,6 +1511,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     this.style = const Value.absent(),
     this.dataSourceId = const Value.absent(),
     this.isEditable = const Value.absent(),
+    this.sourceConfig = const Value.absent(),
     this.downloadedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   })  : id = Value(id),
@@ -1489,6 +1527,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     Expression<String>? style,
     Expression<String>? dataSourceId,
     Expression<bool>? isEditable,
+    Expression<String>? sourceConfig,
     Expression<DateTime>? downloadedAt,
     Expression<int>? rowid,
   }) {
@@ -1501,6 +1540,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
       if (style != null) 'style': style,
       if (dataSourceId != null) 'data_source_id': dataSourceId,
       if (isEditable != null) 'is_editable': isEditable,
+      if (sourceConfig != null) 'source_config': sourceConfig,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
       if (rowid != null) 'rowid': rowid,
     });
@@ -1515,6 +1555,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
       Value<String?>? style,
       Value<String?>? dataSourceId,
       Value<bool>? isEditable,
+      Value<String?>? sourceConfig,
       Value<DateTime>? downloadedAt,
       Value<int>? rowid}) {
     return LayersCompanion(
@@ -1526,6 +1567,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
       style: style ?? this.style,
       dataSourceId: dataSourceId ?? this.dataSourceId,
       isEditable: isEditable ?? this.isEditable,
+      sourceConfig: sourceConfig ?? this.sourceConfig,
       downloadedAt: downloadedAt ?? this.downloadedAt,
       rowid: rowid ?? this.rowid,
     );
@@ -1558,6 +1600,9 @@ class LayersCompanion extends UpdateCompanion<Layer> {
     if (isEditable.present) {
       map['is_editable'] = Variable<bool>(isEditable.value);
     }
+    if (sourceConfig.present) {
+      map['source_config'] = Variable<String>(sourceConfig.value);
+    }
     if (downloadedAt.present) {
       map['downloaded_at'] = Variable<DateTime>(downloadedAt.value);
     }
@@ -1578,6 +1623,7 @@ class LayersCompanion extends UpdateCompanion<Layer> {
           ..write('style: $style, ')
           ..write('dataSourceId: $dataSourceId, ')
           ..write('isEditable: $isEditable, ')
+          ..write('sourceConfig: $sourceConfig, ')
           ..write('downloadedAt: $downloadedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
@@ -6877,6 +6923,7 @@ typedef $$LayersTableCreateCompanionBuilder = LayersCompanion Function({
   Value<String?> style,
   Value<String?> dataSourceId,
   Value<bool> isEditable,
+  Value<String?> sourceConfig,
   Value<DateTime> downloadedAt,
   Value<int> rowid,
 });
@@ -6889,6 +6936,7 @@ typedef $$LayersTableUpdateCompanionBuilder = LayersCompanion Function({
   Value<String?> style,
   Value<String?> dataSourceId,
   Value<bool> isEditable,
+  Value<String?> sourceConfig,
   Value<DateTime> downloadedAt,
   Value<int> rowid,
 });
@@ -6941,6 +6989,9 @@ class $$LayersTableFilterComposer
 
   ColumnFilters<bool> get isEditable => $composableBuilder(
       column: $table.isEditable, builder: (column) => ColumnFilters(column));
+
+  ColumnFilters<String> get sourceConfig => $composableBuilder(
+      column: $table.sourceConfig, builder: (column) => ColumnFilters(column));
 
   ColumnFilters<DateTime> get downloadedAt => $composableBuilder(
       column: $table.downloadedAt, builder: (column) => ColumnFilters(column));
@@ -6998,6 +7049,10 @@ class $$LayersTableOrderingComposer
   ColumnOrderings<bool> get isEditable => $composableBuilder(
       column: $table.isEditable, builder: (column) => ColumnOrderings(column));
 
+  ColumnOrderings<String> get sourceConfig => $composableBuilder(
+      column: $table.sourceConfig,
+      builder: (column) => ColumnOrderings(column));
+
   ColumnOrderings<DateTime> get downloadedAt => $composableBuilder(
       column: $table.downloadedAt,
       builder: (column) => ColumnOrderings(column));
@@ -7052,6 +7107,9 @@ class $$LayersTableAnnotationComposer
 
   GeneratedColumn<bool> get isEditable => $composableBuilder(
       column: $table.isEditable, builder: (column) => column);
+
+  GeneratedColumn<String> get sourceConfig => $composableBuilder(
+      column: $table.sourceConfig, builder: (column) => column);
 
   GeneratedColumn<DateTime> get downloadedAt => $composableBuilder(
       column: $table.downloadedAt, builder: (column) => column);
@@ -7108,6 +7166,7 @@ class $$LayersTableTableManager extends RootTableManager<
             Value<String?> style = const Value.absent(),
             Value<String?> dataSourceId = const Value.absent(),
             Value<bool> isEditable = const Value.absent(),
+            Value<String?> sourceConfig = const Value.absent(),
             Value<DateTime> downloadedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
@@ -7120,6 +7179,7 @@ class $$LayersTableTableManager extends RootTableManager<
             style: style,
             dataSourceId: dataSourceId,
             isEditable: isEditable,
+            sourceConfig: sourceConfig,
             downloadedAt: downloadedAt,
             rowid: rowid,
           ),
@@ -7132,6 +7192,7 @@ class $$LayersTableTableManager extends RootTableManager<
             Value<String?> style = const Value.absent(),
             Value<String?> dataSourceId = const Value.absent(),
             Value<bool> isEditable = const Value.absent(),
+            Value<String?> sourceConfig = const Value.absent(),
             Value<DateTime> downloadedAt = const Value.absent(),
             Value<int> rowid = const Value.absent(),
           }) =>
@@ -7144,6 +7205,7 @@ class $$LayersTableTableManager extends RootTableManager<
             style: style,
             dataSourceId: dataSourceId,
             isEditable: isEditable,
+            sourceConfig: sourceConfig,
             downloadedAt: downloadedAt,
             rowid: rowid,
           ),

@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import {
   CheckCircle2, Edit3, Send, RotateCcw, AlertCircle,
 } from "lucide-react";
@@ -11,6 +13,7 @@ interface Props {
 
 export function LayerPublishBanner({ projectId, layer }: Props) {
   const queryClient = useQueryClient();
+  const [showUnpublishConfirm, setShowUnpublishConfirm] = useState(false);
   const isPublished = layer?.status === "published";
 
   const publishMutation = useMutation({
@@ -30,12 +33,14 @@ export function LayerPublishBanner({ projectId, layer }: Props) {
   const unpublishMutation = useMutation({
     mutationFn: () => api.unpublishLayer(projectId, layer.id),
     onSuccess: () => {
+      setShowUnpublishConfirm(false);
       queryClient.invalidateQueries({ queryKey: ["layer", layer.id] });
       queryClient.invalidateQueries({ queryKey: ["layers", projectId] });
     },
   });
 
   return (
+    <>
     <div
       className={`rounded-xl border p-4 flex items-start gap-3 ${
         isPublished
@@ -74,7 +79,7 @@ export function LayerPublishBanner({ projectId, layer }: Props) {
                   ? new Date(layer.published_at).toLocaleString()
                   : ""
               }.`
-            : "This layer is not yet visible to field workers. Publish when ready to dispatch."}
+            : "This layer is not yet visible to field workers. Publish when ready — the linked form will be published too."}
         </p>
         {!isPublished && (
           <p className="text-xs text-yellow-700 mt-1 flex items-center gap-1">
@@ -87,14 +92,7 @@ export function LayerPublishBanner({ projectId, layer }: Props) {
       <div className="shrink-0">
         {isPublished ? (
           <button
-            onClick={() => {
-              if (
-                confirm(
-                  "Unpublishing will hide this layer from field workers and re-enable editing. Continue?"
-                )
-              )
-                unpublishMutation.mutate();
-            }}
+            onClick={() => setShowUnpublishConfirm(true)}
             disabled={unpublishMutation.isPending}
             className="flex items-center gap-1.5 rounded-lg border border-green-300 bg-white px-3 py-2 text-sm text-green-700 hover:bg-green-100 disabled:opacity-50"
           >
@@ -113,5 +111,18 @@ export function LayerPublishBanner({ projectId, layer }: Props) {
         )}
       </div>
     </div>
+
+    <ConfirmDialog
+      open={showUnpublishConfirm}
+      title="Unpublish layer?"
+      message="This will hide the layer from field workers and allow editing again in draft mode."
+      confirmLabel="Unpublish"
+      cancelLabel="Cancel"
+      destructive
+      loading={unpublishMutation.isPending}
+      onConfirm={() => unpublishMutation.mutate()}
+      onCancel={() => setShowUnpublishConfirm(false)}
+    />
+    </>
   );
 }

@@ -12,6 +12,8 @@ class FeatureSaveButtons extends ConsumerStatefulWidget {
   final String? existingClientId;
   final VoidCallback? onSaved;
   final VoidCallback? onValidationFailed;
+  /// When set (e.g. tablet side-panel form), called instead of Navigator.pop.
+  final VoidCallback? onDismiss;
   final Map<String, dynamic>? initialGeometry;
   final String? initialLayerId;
 
@@ -28,6 +30,7 @@ class FeatureSaveButtons extends ConsumerStatefulWidget {
     this.existingClientId,
     this.onSaved,
     this.onValidationFailed,
+    this.onDismiss,
     this.initialGeometry,
     this.initialLayerId,
     this.referenceSourceRef,
@@ -159,8 +162,10 @@ class _FeatureSaveButtonsState extends ConsumerState<FeatureSaveButtons> {
       await Future.delayed(const Duration(milliseconds: 100));
       if (!mounted) return;
       debugPrint(
-          '[SUBMIT] popping screen, canPop=${Navigator.canPop(context)}');
-      if (Navigator.canPop(context)) {
+          '[SUBMIT] dismissing, canPop=${Navigator.canPop(context)}');
+      if (widget.onDismiss != null) {
+        widget.onDismiss!();
+      } else if (Navigator.canPop(context)) {
         Navigator.pop(context);
       }
     } catch (e, stack) {

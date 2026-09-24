@@ -28,17 +28,25 @@ class FormDetailScreen extends ConsumerWidget {
   final Map<String, dynamic>? referenceOriginalAttributes;
   final Map<String, dynamic>? referenceOriginalGeometry;
 
+  /// When true, render without Scaffold/AppBar for embedding in a side panel.
+  final bool embedded;
+
+  /// Called instead of Navigator.pop when [embedded] (or whenever set).
+  final ValueChanged<Map<String, dynamic>?>? onFinished;
+
   const FormDetailScreen({
     super.key,
     required this.form,
     this.existingClientId,
     this.initialGeometry,
     this.initialLayerId,
-    this.initialAttributes, // 👈 NEW
-    this.referenceSourceRef, // 👈 NEW
-    this.referenceDataSourceId, // 👈 NEW
-    this.referenceOriginalAttributes, // 👈 NEW
-    this.referenceOriginalGeometry, // 👈 NEW
+    this.initialAttributes,
+    this.referenceSourceRef,
+    this.referenceDataSourceId,
+    this.referenceOriginalAttributes,
+    this.referenceOriginalGeometry,
+    this.embedded = false,
+    this.onFinished,
   });
 
   @override
@@ -46,68 +54,73 @@ class FormDetailScreen extends ConsumerWidget {
     final theme = Theme.of(context);
     final schemaAsync = ref.watch(formSchemaProvider(form.id));
 
-    return Scaffold(
-      appBar: AppBar(title: Text(form.name)),
-      body: schemaAsync.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.error_outline,
-                    size: 48, color: theme.colorScheme.error),
-                const SizedBox(height: 8),
-                Text(
-                  'Could not load form',
-                  style: theme.textTheme.titleMedium,
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  e.toString(),
-                  style: theme.textTheme.bodySmall,
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
+    final body = schemaAsync.when(
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.error_outline,
+                  size: 48, color: theme.colorScheme.error),
+              const SizedBox(height: 8),
+              Text(
+                'Could not load form',
+                style: theme.textTheme.titleMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(
+                e.toString(),
+                style: theme.textTheme.bodySmall,
+                textAlign: TextAlign.center,
+              ),
+            ],
           ),
         ),
-        data: (schema) {
-          if (schema == null || schema.isEmpty) {
-            return Center(
-              child: Padding(
-                padding: const EdgeInsets.all(24),
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.help_outline,
-                        size: 48, color: theme.colorScheme.onSurfaceVariant),
-                    const SizedBox(height: 8),
-                    Text(
-                      schema == null ? 'Form not found' : 'Form has no fields',
-                      style: theme.textTheme.titleMedium,
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }
-          return _FormPreview(
-            form: form,
-            schema: schema,
-            existingClientId: existingClientId,
-            initialGeometry: initialGeometry,
-            initialLayerId: initialLayerId,
-            // 👇 D0.3 forwarding
-            initialAttributes: initialAttributes,
-            referenceSourceRef: referenceSourceRef,
-            referenceDataSourceId: referenceDataSourceId,
-            referenceOriginalAttributes: referenceOriginalAttributes,
-            referenceOriginalGeometry: referenceOriginalGeometry,
-          );
-        },
       ),
+      data: (schema) {
+        if (schema == null || schema.isEmpty) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.help_outline,
+                      size: 48, color: theme.colorScheme.onSurfaceVariant),
+                  const SizedBox(height: 8),
+                  Text(
+                    schema == null ? 'Form not found' : 'Form has no fields',
+                    style: theme.textTheme.titleMedium,
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        return _FormPreview(
+          form: form,
+          schema: schema,
+          existingClientId: existingClientId,
+          initialGeometry: initialGeometry,
+          initialLayerId: initialLayerId,
+          initialAttributes: initialAttributes,
+          referenceSourceRef: referenceSourceRef,
+          referenceDataSourceId: referenceDataSourceId,
+          referenceOriginalAttributes: referenceOriginalAttributes,
+          referenceOriginalGeometry: referenceOriginalGeometry,
+          forceStacked: embedded,
+          onFinished: onFinished,
+        );
+      },
+    );
+
+    if (embedded) return body;
+
+    return Scaffold(
+      appBar: AppBar(title: Text(form.name)),
+      body: body,
     );
   }
 }
@@ -126,6 +139,8 @@ class _FormPreview extends ConsumerStatefulWidget {
   final String? referenceDataSourceId;
   final Map<String, dynamic>? referenceOriginalAttributes;
   final Map<String, dynamic>? referenceOriginalGeometry;
+  final bool forceStacked;
+  final ValueChanged<Map<String, dynamic>?>? onFinished;
 
   const _FormPreview({
     required this.form,
@@ -138,6 +153,8 @@ class _FormPreview extends ConsumerStatefulWidget {
     this.referenceDataSourceId,
     this.referenceOriginalAttributes,
     this.referenceOriginalGeometry,
+    this.forceStacked = false,
+    this.onFinished,
   });
 
   @override
@@ -213,6 +230,19 @@ class _FormPreviewState extends ConsumerState<_FormPreview> {
     return res ?? false;
   }
 
+  void _finish([Map<String, dynamic>? result]) {
+    if (widget.onFinished != null) {
+      widget.onFinished!(result);
+    } else {
+      Navigator.of(context).pop(result);
+    }
+  }
+
+  Future<void> _requestClose() async {
+    final ok = await _confirmDiscard();
+    if (ok && mounted) _finish();
+  }
+
   /// Scroll to the first error field after validation fails.
   void _scrollToFirstError() {
     final ctrl = _ctrl;
@@ -241,7 +271,7 @@ class _FormPreviewState extends ConsumerState<_FormPreview> {
       child: InkWell(
         onTap: () {
           // ── D6.2: return a special payload so the map screen can enter edit mode ──
-          Navigator.of(context).pop(<String, dynamic>{
+          _finish(<String, dynamic>{
             '__edit_geometry__': true,
             'source_ref': widget.referenceSourceRef,
             'original_geometry': widget.initialGeometry,
@@ -345,13 +375,10 @@ class _FormPreviewState extends ConsumerState<_FormPreview> {
     final ctrl = _ctrl!;
 
     return PopScope(
-      canPop: !ctrl.touched,
+      canPop: widget.onFinished != null ? false : !ctrl.touched,
       onPopInvokedWithResult: (didPop, _) async {
         if (didPop) return;
-        final ok = await _confirmDiscard();
-        if (ok && mounted) {
-          Navigator.of(context).pop();
-        }
+        await _requestClose();
       },
       child: ProjectIdScope(
         projectId: widget.form.projectId,
@@ -359,6 +386,34 @@ class _FormPreviewState extends ConsumerState<_FormPreview> {
           controller: ctrl,
           child: Column(
             children: [
+              if (widget.onFinished != null)
+                Material(
+                      color: theme.colorScheme.surfaceContainerHighest
+                          .withOpacity(0.5),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            widget.form.name,
+                            style: theme.textTheme.titleSmall?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Close',
+                          icon: const Icon(Icons.close),
+                          onPressed: _requestClose,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               Expanded(
                 child: SingleChildScrollView(
                   controller: _scrollController,
@@ -374,6 +429,7 @@ class _FormPreviewState extends ConsumerState<_FormPreview> {
 
                       // ── Two-pane layout: form on left, context on right (tablet landscape only) ──
                       AdaptiveTwoColumn(
+                        forceStacked: widget.forceStacked,
                         leftFlex: 3,
                         rightFlex: 2,
                         left: [
@@ -466,6 +522,8 @@ class _FormPreviewState extends ConsumerState<_FormPreview> {
                     form: widget.form,
                     existingClientId: widget.existingClientId,
                     onValidationFailed: _scrollToFirstError,
+                    onDismiss:
+                        widget.onFinished != null ? () => _finish() : null,
                     initialGeometry: widget.initialGeometry,
                     initialLayerId: widget.initialLayerId,
                     // 👇 D0.3

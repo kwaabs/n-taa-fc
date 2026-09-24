@@ -371,9 +371,13 @@ func (p *BundleWorkerPool) runLayerRefJob(job *model.ImportJob, cfg bundleJobCon
 	mw := io.MultiWriter(&buf, hasher)
 	zw := zip.NewWriter(mw)
 
-	p.progress(ctx, job.ID, "reference_features", 20)
-	refCount, err := p.writeOneLayerReference(
+	p.progress(ctx, job.ID, "querying_features", 15)
+	slog.Info("layer reference pack: querying features",
+		"job_id", job.ID, "layer_id", layer.ID, "layer_name", layer.Name,
+		"source_type", layer.SourceType)
+	emit, err := p.writeOneLayerReference(
 		ctx, zw, *layer, project.AreaOfInterest, hasAOI, project.AOIBufferMeters(),
+		func(step string, pct int) { p.progress(ctx, job.ID, step, pct) },
 	)
 	if err != nil {
 		p.finishFailed(ctx, job, "write reference: "+err.Error())
@@ -382,9 +386,17 @@ func (p *BundleWorkerPool) runLayerRefJob(job *model.ImportJob, cfg bundleJobCon
 
 	counts := model.BundleCounts{
 		Layers:            1,
-		ReferenceFeatures: refCount,
+		ReferenceFeatures: emit.FeatureCount,
 	}
 	manifest["counts"] = counts
+	manifest["tiles_only"] = emit.TilesOnly
+	manifest["has_mbtiles"] = emit.HasTiles
+	manifest["feature_count"] = emit.FeatureCount
+	if emit.TilesOnly {
+		warnings = append(warnings,
+			"Pack is tiles-only: full GeoJSON omitted. Map uses mbtiles; attribute search is limited offline.")
+		manifest["warnings"] = warnings
+	}
 
 	p.progress(ctx, job.ID, "manifest", 90)
 	manifest["bundle_hash"] = hex.EncodeToString(hasher.Sum(nil))[:16]
@@ -447,7 +459,8 @@ func (p *BundleWorkerPool) runLayerRefJob(job *model.ImportJob, cfg bundleJobCon
 		"job_id", job.ID,
 		"layer_id", layer.ID,
 		"size_bytes", buf.Len(),
-		"ref_features", refCount,
+		"ref_features", emit.FeatureCount,
+		"tiles_only", emit.TilesOnly,
 	)
 }
 
@@ -638,32 +651,94 @@ func (p *BundleWorkerPool) writeReferenceFeatures(
 	perLayer := 50.0 / float64(max(len(layers), 1))
 
 	for _, l := range layers {
-		n, err := p.writeOneLayerReference(ctx, zw, l, aoi, hasAOI, bufferMeters)
+		emit, err := p.writeOneLayerReference(ctx, zw, l, aoi, hasAOI, bufferMeters, nil)
 		if err != nil {
 			return total, err
 		}
-		total += n
+		total += emit.FeatureCount
 		step += perLayer
 		p.progress(ctx, jobID, fmt.Sprintf("ref_features_%s", l.ID), int(step))
 	}
 	return total, nil
 }
 
+// layerRefEmit describes what was written for one layer's reference pack entry.
+type layerRefEmit struct {
+	FeatureCount int
+	HasTiles     bool
+	TilesOnly    bool // mbtiles present; full GeoJSON omitted from the zip
+}
+
 func (p *BundleWorkerPool) writeOneLayerReference(
 	ctx context.Context, zw *zip.Writer, l model.Layer,
 	aoi json.RawMessage, hasAOI bool, bufferMeters int,
-) (int, error) {
+	onProgress func(step string, pct int),
+) (layerRefEmit, error) {
+	report := func(step string, pct int) {
+		if onProgress != nil {
+			onProgress(step, pct)
+		}
+	}
 	var (
 		features []map[string]interface{}
 		err      error
+		out      layerRefEmit
 	)
+	report("querying_features", 20)
 	if l.SourceType == "linked_table" {
 		features, err = p.queryLinkedReferenceFeatures(ctx, l, aoi, hasAOI, bufferMeters)
 	} else {
 		features, err = p.queryCopiedReferenceFeatures(ctx, l, aoi, hasAOI, bufferMeters)
 	}
 	if err != nil {
-		return 0, fmt.Errorf("query layer %s (%s): %w", l.Name, l.ID, err)
+		return out, fmt.Errorf("query layer %s (%s): %w", l.Name, l.ID, err)
+	}
+	out.FeatureCount = len(features)
+	slog.Info("layer reference pack: features loaded",
+		"layer_id", l.ID, "layer_name", l.Name, "features", len(features))
+
+	// Compact NDJSON for offline search (attributes + geometry in SQLite).
+	if len(features) > 0 {
+		if err := writeReferenceSearchNDJSON(zw, l.ID, features); err != nil {
+			return out, err
+		}
+	}
+
+	// Prefer tiles: when tippecanoe succeeds, omit full GeoJSON from the pack
+	// so mobile does not download/seed hundreds of thousands of rows.
+	if p.tippecanoeClient != nil && len(features) > 0 {
+		report("tiling", 40)
+		geomType := mapGeometryTypeToTippecanoe(l.GeometryType)
+		params := DefaultTileParams("reference_features", geomType)
+		mbtiles, tileErr := p.tippecanoeClient.GenerateTiles(ctx, features, params)
+		if tileErr != nil {
+			return out, fmt.Errorf("tile generation failed for layer %s: %w", l.ID, tileErr)
+		}
+		if err := writeBytes(zw, fmt.Sprintf("reference_tiles/%s.mbtiles", l.ID), mbtiles); err != nil {
+			return out, err
+		}
+		out.HasTiles = true
+		out.TilesOnly = true
+		slog.Info("emitted mbtiles (tiles-only pack)",
+			"layer_id", l.ID,
+			"layer_name", l.Name,
+			"source_type", l.SourceType,
+			"features", len(features),
+			"mbtiles_kb", len(mbtiles)/1024,
+		)
+		// Tiny stub so path discovery still works; no feature payloads.
+		stub := map[string]interface{}{
+			"type":     "FeatureCollection",
+			"features": []interface{}{},
+			"fc_meta": map[string]interface{}{
+				"tiles_only":    true,
+				"feature_count": len(features),
+			},
+		}
+		if err := writeJSON(zw, fmt.Sprintf("reference_features/%s.geojson", l.ID), stub); err != nil {
+			return out, err
+		}
+		return out, nil
 	}
 
 	geojson := map[string]interface{}{
@@ -671,31 +746,9 @@ func (p *BundleWorkerPool) writeOneLayerReference(
 		"features": features,
 	}
 	if err := writeJSON(zw, fmt.Sprintf("reference_features/%s.geojson", l.ID), geojson); err != nil {
-		return 0, err
+		return out, err
 	}
-
-	if p.tippecanoeClient != nil && len(features) > 0 {
-		geomType := mapGeometryTypeToTippecanoe(l.GeometryType)
-		params := DefaultTileParams("reference_features", geomType)
-		mbtiles, tileErr := p.tippecanoeClient.GenerateTiles(features, params)
-		if tileErr != nil {
-			slog.Warn("tile generation failed; pack will use GeoJSON only",
-				"layer_id", l.ID, "error", tileErr)
-		} else {
-			if err := writeBytes(zw, fmt.Sprintf("reference_tiles/%s.mbtiles", l.ID), mbtiles); err != nil {
-				return 0, err
-			}
-			slog.Info("emitted mbtiles",
-				"layer_id", l.ID,
-				"layer_name", l.Name,
-				"source_type", l.SourceType,
-				"features", len(features),
-				"mbtiles_kb", len(mbtiles)/1024,
-			)
-		}
-	}
-
-	return len(features), nil
+	return out, nil
 }
 
 func (p *BundleWorkerPool) queryCopiedReferenceFeatures(
@@ -1017,6 +1070,25 @@ func flattenWithExtras(value any, extras map[string]interface{}) (map[string]int
 		out[k] = v
 	}
 	return out, nil
+}
+
+// writeReferenceSearchNDJSON stores one GeoJSON Feature per line for mobile
+// offline search without duplicating a full FeatureCollection in the zip.
+func writeReferenceSearchNDJSON(
+	zw *zip.Writer, layerID uuid.UUID, features []map[string]interface{},
+) error {
+	path := fmt.Sprintf("reference_search/%s.ndjson", layerID)
+	w, err := zw.Create(path)
+	if err != nil {
+		return err
+	}
+	enc := json.NewEncoder(w)
+	for _, f := range features {
+		if err := enc.Encode(f); err != nil {
+			return fmt.Errorf("encode search feature: %w", err)
+		}
+	}
+	return nil
 }
 
 // writeBytes writes raw bytes as a file entry in the bundle zip.

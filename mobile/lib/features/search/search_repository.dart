@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/db/app_database.dart';
 import '../../core/db/db_provider.dart';
+import '../../core/forms/form_schema.dart';
 import 'search_state.dart';
 
 class SearchRepository {
@@ -13,38 +14,123 @@ class SearchRepository {
 
   SearchRepository(this._db);
 
-  /// Discovers all attribute keys used across a layer's reference features.
-  /// Scans the JSON blobs since Drift's schema doesn't know them.
+  /// Discovers attribute keys for the search builder.
+  ///
+  /// Prefer keys sampled from [referenceFeatures] (populated from layer search
+  /// index). When tiles-only packs leave SQLite empty, fall back to layer
+  /// source_config column lists and linked form schema field ids.
   Future<List<String>> discoverAttributes({
     required String projectId,
     required String layerId,
     int sampleSize = 500,
   }) async {
-    // Sample features from this layer
+    final keys = <String>{};
+
     final rows = await (_db.select(_db.referenceFeatures)
           ..where((r) => r.projectId.equals(projectId))
           ..where((r) => r.layerId.equals(layerId))
           ..limit(sampleSize))
         .get();
 
-    final keys = <String>{};
     for (final row in rows) {
-      try {
-        final parsed = jsonDecode(row.attributes);
-        if (parsed is Map) {
-          for (final key in parsed.keys) {
-            if (key is String && !key.startsWith('_')) {
-              keys.add(key);
-            }
-          }
+      keys.addAll(_keysFromAttributesJson(row.attributes));
+    }
+    if (keys.isNotEmpty) {
+      final sorted = keys.toList()..sort();
+      return sorted;
+    }
+
+    final layer = await (_db.select(_db.layers)
+          ..where((l) => l.id.equals(layerId))
+          ..where((l) => l.projectId.equals(projectId)))
+        .getSingleOrNull();
+    if (layer == null) return const [];
+
+    keys.addAll(_keysFromSourceConfig(layer.sourceConfig));
+
+    if (layer.formId != null && layer.formId!.isNotEmpty) {
+      final form = await (_db.select(_db.forms)
+            ..where((f) => f.id.equals(layer.formId!)))
+          .getSingleOrNull();
+      if (form != null) {
+        try {
+          final schema = FormSchema.fromJson(jsonDecode(form.schema));
+          keys.addAll(_keysFromFormSchema(schema));
+        } catch (e) {
+          debugPrint('[search] form schema parse failed: $e');
         }
-      } catch (_) {
-        // Skip malformed rows
       }
     }
 
     final sorted = keys.toList()..sort();
     return sorted;
+  }
+
+  Set<String> _keysFromAttributesJson(String attributesJson) {
+    final keys = <String>{};
+    try {
+      final parsed = jsonDecode(attributesJson);
+      if (parsed is Map) {
+        for (final key in parsed.keys) {
+          if (key is String && !key.startsWith('_')) {
+            keys.add(key);
+          }
+        }
+      }
+    } catch (_) {}
+    return keys;
+  }
+
+  Set<String> _keysFromSourceConfig(String? sourceConfigJson) {
+    final keys = <String>{};
+    if (sourceConfigJson == null || sourceConfigJson.isEmpty) return keys;
+    try {
+      final cfg = jsonDecode(sourceConfigJson);
+      if (cfg is! Map) return keys;
+      final idCol = cfg['id_column']?.toString();
+      if (idCol != null && idCol.isNotEmpty) keys.add(idCol);
+      final included = cfg['included_columns'];
+      if (included is List) {
+        for (final col in included) {
+          final name = col?.toString();
+          if (name != null && name.isNotEmpty && !name.startsWith('_')) {
+            keys.add(name);
+          }
+        }
+      }
+    } catch (_) {}
+    return keys;
+  }
+
+  Set<String> _keysFromFormSchema(FormSchema schema) {
+    final keys = <String>{};
+    void walk(FormFieldSpec field) {
+      if (field.type == FieldType.group) {
+        for (final child in field.children) {
+          walk(child);
+        }
+        return;
+      }
+      switch (field.type) {
+        case FieldType.geoPoint:
+        case FieldType.geoTrace:
+        case FieldType.geoShape:
+        case FieldType.note:
+        case FieldType.calculated:
+        case FieldType.unknown:
+          return;
+        default:
+          break;
+      }
+      if (field.id.isNotEmpty && !field.id.startsWith('_')) {
+        keys.add(field.id);
+      }
+    }
+
+    for (final field in schema.fields) {
+      walk(field);
+    }
+    return keys;
   }
 
   /// Executes a query against reference_features.
@@ -53,6 +139,7 @@ class SearchRepository {
     required String projectId,
     required String layerId,
     required List<QueryCondition> conditions,
+    bool caseSensitive = false,
     int maxResults = 200,
   }) async {
     // Filter to only valid conditions
@@ -67,7 +154,7 @@ class SearchRepository {
     final args = <dynamic>[projectId, layerId];
 
     for (final c in valid) {
-      final clause = _buildClause(c, args);
+      final clause = _buildClause(c, args, caseSensitive: caseSensitive);
       if (clause != null) {
         whereClauses.add(clause);
       }
@@ -112,6 +199,10 @@ class SearchRepository {
         );
       }
 
+      if (kDebugMode) {
+        debugPrint('[search] returned ${searchResults.length} results');
+      }
+
       return searchResults;
     } catch (e, s) {
       debugPrint('[search] query failed: $e\n$s');
@@ -119,58 +210,138 @@ class SearchRepository {
     }
   }
 
-  /// Builds a SQL WHERE clause for a single condition.
-  /// Appends any bound values to [args].
-  String? _buildClause(QueryCondition c, List<dynamic> args) {
+  /// Rows in SQLite available for offline search on this layer.
+  Future<int> countReferenceFeatures({
+    required String projectId,
+    required String layerId,
+  }) async {
+    final rows = await (_db.select(_db.referenceFeatures)
+          ..where((r) => r.projectId.equals(projectId))
+          ..where((r) => r.layerId.equals(layerId)))
+        .get();
+    return rows.length;
+  }
+
+  /// Builds a WHERE clause for one condition.
+  /// Uses json_each so attribute names match case-insensitively.
+  String? _buildClause(
+    QueryCondition c,
+    List<dynamic> args, {
+    required bool caseSensitive,
+  }) {
     final attr = c.attribute!;
-    final extractSql = "json_extract(attributes, '\$.$attr')";
     final val = c.value.trim();
     final val2 = c.value2.trim();
 
+    String keyMatch(String alias) =>
+        caseSensitive ? '$alias.key = ?' : 'LOWER($alias.key) = LOWER(?)';
+
+    String textExpr(String alias) => caseSensitive
+        ? 'CAST($alias.value AS TEXT)'
+        : 'LOWER(CAST($alias.value AS TEXT))';
+
+    String bindText(String s) => caseSensitive ? s : s.toLowerCase();
+
     switch (c.operator) {
       case QueryOperator.equals:
-        args.add(val);
-        // For numeric equality, cast the extracted value
-        return "(CAST($extractSql AS TEXT) = CAST(? AS TEXT))";
+        args.add(attr);
+        args.add(bindText(val));
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND ${textExpr('je')} = ?
+        )''';
 
       case QueryOperator.notEquals:
-        args.add(val);
-        return "(CAST($extractSql AS TEXT) != CAST(? AS TEXT))";
+        args.add(attr);
+        args.add(bindText(val));
+        return '''NOT EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND ${textExpr('je')} = ?
+        )''';
 
       case QueryOperator.contains:
-        args.add('%$val%');
-        return "CAST($extractSql AS TEXT) LIKE ?";
+        args.add(attr);
+        args.add('%${bindText(val)}%');
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND ${textExpr('je')} LIKE ?
+        )''';
 
       case QueryOperator.startsWith:
-        args.add('$val%');
-        return "CAST($extractSql AS TEXT) LIKE ?";
+        args.add(attr);
+        args.add('${bindText(val)}%');
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND ${textExpr('je')} LIKE ?
+        )''';
 
       case QueryOperator.greaterThan:
+        args.add(attr);
         args.add(val);
-        return "(CAST($extractSql AS REAL) > CAST(? AS REAL))";
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND CAST(je.value AS REAL) > CAST(? AS REAL)
+        )''';
 
       case QueryOperator.greaterOrEqual:
+        args.add(attr);
         args.add(val);
-        return "(CAST($extractSql AS REAL) >= CAST(? AS REAL))";
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND CAST(je.value AS REAL) >= CAST(? AS REAL)
+        )''';
 
       case QueryOperator.lessThan:
+        args.add(attr);
         args.add(val);
-        return "(CAST($extractSql AS REAL) < CAST(? AS REAL))";
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND CAST(je.value AS REAL) < CAST(? AS REAL)
+        )''';
 
       case QueryOperator.lessOrEqual:
+        args.add(attr);
         args.add(val);
-        return "(CAST($extractSql AS REAL) <= CAST(? AS REAL))";
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND CAST(je.value AS REAL) <= CAST(? AS REAL)
+        )''';
 
       case QueryOperator.between:
+        args.add(attr);
         args.add(val);
         args.add(val2);
-        return "(CAST($extractSql AS REAL) BETWEEN CAST(? AS REAL) AND CAST(? AS REAL))";
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND CAST(je.value AS REAL) BETWEEN CAST(? AS REAL) AND CAST(? AS REAL)
+        )''';
 
       case QueryOperator.isEmpty:
-        return "($extractSql IS NULL OR CAST($extractSql AS TEXT) = '')";
+        args.add(attr);
+        return '''NOT EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND je.value IS NOT NULL
+          AND CAST(je.value AS TEXT) != ''
+        )''';
 
       case QueryOperator.isNotEmpty:
-        return "($extractSql IS NOT NULL AND CAST($extractSql AS TEXT) != '')";
+        args.add(attr);
+        return '''EXISTS (
+          SELECT 1 FROM json_each(attributes) je
+          WHERE ${keyMatch('je')}
+          AND je.value IS NOT NULL
+          AND CAST(je.value AS TEXT) != ''
+        )''';
     }
   }
 
@@ -195,6 +366,17 @@ final searchAttributesProvider = FutureProvider.family
   final repo = ref.watch(searchRepositoryProvider);
   if (repo == null) return const [];
   return repo.discoverAttributes(
+    projectId: key.projectId,
+    layerId: key.layerId,
+  );
+});
+
+/// How many searchable reference rows exist locally for a layer.
+final searchIndexCountProvider = FutureProvider.family
+    .autoDispose<int, ({String projectId, String layerId})>((ref, key) async {
+  final repo = ref.watch(searchRepositoryProvider);
+  if (repo == null) return 0;
+  return repo.countReferenceFeatures(
     projectId: key.projectId,
     layerId: key.layerId,
   );

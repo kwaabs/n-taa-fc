@@ -285,21 +285,35 @@ func (s *LayerService) Delete(ctx context.Context, layerID, userID uuid.UUID) er
 }
 
 func (s *LayerService) Publish(ctx context.Context, projectID, layerID, userID uuid.UUID) (*model.Layer, error) {
-    member, err := s.memberRepo.FindByProjectAndUser(ctx, projectID, userID)
-    if err != nil || (member.Role != "admin" && member.Role != "supervisor") {
-        return nil, fmt.Errorf("access denied: admin or supervisor role required")
-    }
-    layer, err := s.layerRepo.FindByID(ctx, layerID)
-    if err != nil {
-        return nil, fmt.Errorf("layer not found")
-    }
-    if layer.ProjectID != projectID {
-        return nil, fmt.Errorf("layer does not belong to this project")
-    }
-    if err := s.layerRepo.Publish(ctx, layerID, userID); err != nil {
-        return nil, fmt.Errorf("failed to publish layer: %w", err)
-    }
-    return s.layerRepo.FindByID(ctx, layerID)
+	member, err := s.memberRepo.FindByProjectAndUser(ctx, projectID, userID)
+	if err != nil || (member.Role != "admin" && member.Role != "supervisor") {
+		return nil, fmt.Errorf("access denied: admin or supervisor role required")
+	}
+	layer, err := s.layerRepo.FindByID(ctx, layerID)
+	if err != nil {
+		return nil, fmt.Errorf("layer not found")
+	}
+	if layer.ProjectID != projectID {
+		return nil, fmt.Errorf("layer does not belong to this project")
+	}
+
+	if layer.SourceType == "linked_table" {
+		layer, err = s.EnsureLinkedForm(ctx, layerID, userID)
+		if err != nil {
+			return nil, fmt.Errorf("ensure linked form: %w", err)
+		}
+	}
+
+	if layer.FormID != nil && s.formSvc != nil {
+		if err := s.formSvc.PublishLatestDraft(ctx, *layer.FormID, userID); err != nil {
+			return nil, fmt.Errorf("publish layer form: %w", err)
+		}
+	}
+
+	if err := s.layerRepo.Publish(ctx, layerID, userID); err != nil {
+		return nil, fmt.Errorf("failed to publish layer: %w", err)
+	}
+	return s.layerRepo.FindByID(ctx, layerID)
 }
 
 func (s *LayerService) Unpublish(ctx context.Context, projectID, layerID, userID uuid.UUID) (*model.Layer, error) {
@@ -624,89 +638,195 @@ func normalizeSQLValue(v interface{}) interface{} {
 
 // EnsureLinkedForm creates a form from the live source table columns when a
 // linked_table layer has no form yet (e.g. older link imports that skipped forms).
+// When a form already exists, it appends the standard optional Photos field if
+// missing and publishes a new version so mobile picks it up on the next sync.
 func (s *LayerService) EnsureLinkedForm(ctx context.Context, layerID, userID uuid.UUID) (*model.Layer, error) {
-    layer, err := s.layerRepo.FindByID(ctx, layerID)
-    if err != nil {
-        return nil, fmt.Errorf("layer not found")
-    }
-    if _, err := s.memberRepo.FindByProjectAndUser(ctx, layer.ProjectID, userID); err != nil {
-        return nil, fmt.Errorf("access denied: not a member of this project")
-    }
-    if layer.FormID != nil {
-        return layer, nil
-    }
-    if layer.SourceType != "linked_table" {
-        return nil, fmt.Errorf("form backfill is only supported for linked_table layers")
-    }
+	layer, err := s.layerRepo.FindByID(ctx, layerID)
+	if err != nil {
+		return nil, fmt.Errorf("layer not found")
+	}
+	if _, err := s.memberRepo.FindByProjectAndUser(ctx, layer.ProjectID, userID); err != nil {
+		return nil, fmt.Errorf("access denied: not a member of this project")
+	}
+	if layer.SourceType != "linked_table" {
+		return nil, fmt.Errorf("form backfill is only supported for linked_table layers")
+	}
 
-    var cfg struct {
-        Schema          string   `json:"schema"`
-        Table           string   `json:"table"`
-        GeometryColumn  string   `json:"geometry_column"`
-        IncludedColumns []string `json:"included_columns"`
-    }
-    if err := json.Unmarshal(layer.SourceConfig, &cfg); err != nil || cfg.Schema == "" || cfg.Table == "" {
-        return nil, fmt.Errorf("linked layer is missing schema/table in source_config")
-    }
+	if layer.FormID != nil {
+		if err := s.ensureLinkedFormHasPhotoField(ctx, *layer.FormID); err != nil {
+			return nil, err
+		}
+		return layer, nil
+	}
 
-    cols, err := listTableColumns(ctx, s.db, cfg.Schema, cfg.Table, cfg.GeometryColumn)
-    if err != nil {
-        return nil, fmt.Errorf("discover columns: %w", err)
-    }
-    dt := model.DiscoveredTable{
-        Schema:        cfg.Schema,
-        Name:          cfg.Table,
-        QualifiedName: cfg.Schema + "." + cfg.Table,
-        Columns:       cols,
-    }
-    schema, err := GenerateForm(dt, cfg.IncludedColumns)
-    if err != nil {
-        return nil, err
-    }
-    schemaRaw, err := SchemaToRaw(schema)
-    if err != nil {
-        return nil, err
-    }
+	var cfg struct {
+		Schema          string   `json:"schema"`
+		Table           string   `json:"table"`
+		GeometryColumn  string   `json:"geometry_column"`
+		IncludedColumns []string `json:"included_columns"`
+	}
+	if err := json.Unmarshal(layer.SourceConfig, &cfg); err != nil || cfg.Schema == "" || cfg.Table == "" {
+		return nil, fmt.Errorf("linked layer is missing schema/table in source_config")
+	}
 
-    form := &model.Form{
-        ProjectID:   layer.ProjectID,
-        Name:        layer.Name + " Form",
-        Description: "Auto-generated from " + dt.QualifiedName,
-        Schema:      schemaRaw,
-        Version:     1,
-        IsActive:    true,
-    }
+	cols, err := listTableColumns(ctx, s.db, cfg.Schema, cfg.Table, cfg.GeometryColumn)
+	if err != nil {
+		return nil, fmt.Errorf("discover columns: %w", err)
+	}
+	dt := model.DiscoveredTable{
+		Schema:        cfg.Schema,
+		Name:          cfg.Table,
+		QualifiedName: cfg.Schema + "." + cfg.Table,
+		Columns:       cols,
+	}
+	schema, err := GenerateForm(dt, cfg.IncludedColumns)
+	if err != nil {
+		return nil, err
+	}
+	schemaRaw, err := SchemaToRaw(schema)
+	if err != nil {
+		return nil, err
+	}
 
-    tx, err := s.db.BeginTx(ctx, nil)
-    if err != nil {
-        return nil, err
-    }
-    defer tx.Rollback()
+	form := &model.Form{
+		ProjectID:   layer.ProjectID,
+		Name:        layer.Name + " Form",
+		Description: "Auto-generated from " + dt.QualifiedName,
+		Schema:      schemaRaw,
+		Version:     1,
+		IsActive:    true,
+	}
 
-    if err := s.formRepo.Create(ctx, tx, form); err != nil {
-        return nil, fmt.Errorf("create form: %w", err)
-    }
-    now := time.Now()
-    fv := &model.FormVersion{
-        FormID:      form.ID,
-        Version:     1,
-        Schema:      schemaRaw,
-        IsDraft:     false,
-        PublishedAt: &now,
-        Changelog:   "Auto-generated from linked table " + dt.QualifiedName,
-    }
-    if _, err := tx.NewInsert().Model(fv).Exec(ctx); err != nil {
-        return nil, fmt.Errorf("create form version: %w", err)
-    }
-    if err := tx.Commit(); err != nil {
-        return nil, err
-    }
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
 
-    layer.FormID = &form.ID
-    if err := s.layerRepo.Update(ctx, layer); err != nil {
-        return nil, fmt.Errorf("link form to layer: %w", err)
-    }
-    return layer, nil
+	if err := s.formRepo.Create(ctx, tx, form); err != nil {
+		return nil, fmt.Errorf("create form: %w", err)
+	}
+	now := time.Now()
+	fv := &model.FormVersion{
+		FormID:      form.ID,
+		Version:     1,
+		Schema:      schemaRaw,
+		IsDraft:     false,
+		PublishedAt: &now,
+		Changelog:   "Auto-generated from linked table " + dt.QualifiedName,
+	}
+	if _, err := tx.NewInsert().Model(fv).Exec(ctx); err != nil {
+		return nil, fmt.Errorf("create form version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	layer.FormID = &form.ID
+	if err := s.layerRepo.Update(ctx, layer); err != nil {
+		return nil, fmt.Errorf("link form to layer: %w", err)
+	}
+	return layer, nil
+}
+
+func (s *LayerService) ensureLinkedFormHasPhotoField(ctx context.Context, formID uuid.UUID) error {
+	form, err := s.formRepo.FindByID(ctx, formID)
+	if err != nil {
+		return fmt.Errorf("form not found")
+	}
+	var schema model.FormSchema
+	if err := json.Unmarshal(form.Schema, &schema); err != nil {
+		return fmt.Errorf("invalid form schema: %w", err)
+	}
+	SanitizeLinkedFormSchema(&schema)
+	schemaRaw, err := SchemaToRaw(&schema)
+	if err != nil {
+		return err
+	}
+
+	// Mobile bundles use the latest *published* schema. Do not exit early when
+	// forms.schema already has Photos but the published version does not (e.g.
+	// draft saved in the form builder without publish).
+	if pub, pubErr := s.formRepo.FindLatestPublishedVersion(ctx, formID); pubErr == nil && pub != nil {
+		if FormSchemaJSONEqual(schemaRaw, pub.Schema) {
+			form.Schema = schemaRaw
+			form.Version = pub.Version
+			return s.formRepo.Update(ctx, form)
+		}
+	}
+
+	versions, err := s.formRepo.ListVersionsByForm(ctx, formID)
+	if err != nil {
+		return fmt.Errorf("list form versions: %w", err)
+	}
+
+	maxVer := form.Version
+	for _, v := range versions {
+		if v.Version > maxVer {
+			maxVer = v.Version
+		}
+	}
+
+	now := time.Now()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	changelog := "Sanitize linked form: drop system ID fields, ensure optional Photos"
+
+	if len(versions) > 0 && versions[0].IsDraft {
+		latest := versions[0]
+		latest.Schema = schemaRaw
+		latest.IsDraft = false
+		latest.PublishedAt = &now
+		latest.Changelog = changelog
+		if _, err := tx.NewUpdate().
+			Model(&latest).
+			Column("schema", "is_draft", "published_at", "changelog").
+			WherePK().
+			Exec(ctx); err != nil {
+			return fmt.Errorf("publish form version: %w", err)
+		}
+		form.Schema = schemaRaw
+		form.Version = latest.Version
+		form.UpdatedAt = now
+		if _, err := tx.NewUpdate().
+			Model(form).
+			WherePK().
+			Column("schema", "version", "updated_at").
+			Exec(ctx); err != nil {
+			return fmt.Errorf("update form: %w", err)
+		}
+		return tx.Commit()
+	}
+
+	nextVer := maxVer + 1
+	fv := &model.FormVersion{
+		FormID:      form.ID,
+		Version:     nextVer,
+		Schema:      schemaRaw,
+		IsDraft:     false,
+		PublishedAt: &now,
+		Changelog:   changelog,
+	}
+
+	form.Schema = schemaRaw
+	form.Version = nextVer
+	form.UpdatedAt = now
+
+	if _, err := tx.NewInsert().Model(fv).Exec(ctx); err != nil {
+		return fmt.Errorf("create form version: %w", err)
+	}
+	if _, err := tx.NewUpdate().
+		Model(form).
+		WherePK().
+		Column("schema", "version", "updated_at").
+		Exec(ctx); err != nil {
+		return fmt.Errorf("update form: %w", err)
+	}
+	return tx.Commit()
 }
 
 // ApplyFormTemplate attaches a form to a layer. Same-project forms are linked
@@ -747,6 +867,11 @@ func (s *LayerService) ApplyFormTemplate(
 	layer.FormID = &formID
 	if err := s.layerRepo.Update(ctx, layer); err != nil {
 		return nil, fmt.Errorf("link form to layer: %w", err)
+	}
+	if layer.SourceType == "linked_table" {
+		if err := s.ensureLinkedFormHasPhotoField(ctx, formID); err != nil {
+			return nil, err
+		}
 	}
 	return layer, nil
 }

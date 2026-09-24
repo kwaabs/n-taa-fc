@@ -177,22 +177,24 @@ class _NotificationHostState extends ConsumerState<NotificationHost>
       if (messenger == null) return;
 
       final isMessage = alert.kind == 'message';
+      final label = isMessage
+          ? 'New message: ${alert.title}'
+          : 'New notification: ${alert.title}';
+
       messenger.clearSnackBars();
       messenger.showSnackBar(
         SnackBar(
           duration: const Duration(seconds: 8),
-          content: Text(
-            isMessage
-                ? 'New message: ${alert.title}'
-                : 'New notification: ${alert.title}',
-          ),
-          action: SnackBarAction(
-            label: 'View',
-            onPressed: () {
+          showCloseIcon: true,
+          behavior: SnackBarBehavior.floating,
+          content: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () {
+              messenger.hideCurrentSnackBar();
               final ctx = rootScaffoldMessengerKey.currentContext;
-              if (ctx == null) return;
-              showNotificationsSheet(ctx, ref);
+              if (ctx != null) showNotificationsSheet(ctx, ref);
             },
+            child: Text(label),
           ),
         ),
       );

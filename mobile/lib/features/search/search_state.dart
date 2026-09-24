@@ -103,6 +103,8 @@ class QueryCondition {
 class SearchQueryState {
   final String? layerId;
   final List<QueryCondition> conditions;
+  /// When false (default), text comparisons ignore letter case.
+  final bool caseSensitive;
   final bool isRunning;
   final List<SearchResult>? results; // null = no search run yet
   final String? error;
@@ -110,6 +112,7 @@ class SearchQueryState {
   const SearchQueryState({
     this.layerId,
     this.conditions = const [],
+    this.caseSensitive = false,
     this.isRunning = false,
     this.results,
     this.error,
@@ -118,6 +121,7 @@ class SearchQueryState {
   SearchQueryState copyWith({
     String? layerId,
     List<QueryCondition>? conditions,
+    bool? caseSensitive,
     bool? isRunning,
     List<SearchResult>? results,
     String? error,
@@ -127,6 +131,7 @@ class SearchQueryState {
     return SearchQueryState(
       layerId: layerId ?? this.layerId,
       conditions: conditions ?? this.conditions,
+      caseSensitive: caseSensitive ?? this.caseSensitive,
       isRunning: isRunning ?? this.isRunning,
       results: clearResults ? null : (results ?? this.results),
       error: clearError ? null : (error ?? this.error),
@@ -238,7 +243,22 @@ class SearchQueryNotifier extends StateNotifier<SearchQueryState> {
     state = state.copyWith(error: message, isRunning: false);
   }
 
+  void setCaseSensitive(bool value) {
+    state = state.copyWith(caseSensitive: value);
+  }
+
+  void clearResults() {
+    state = state.copyWith(
+      clearResults: true,
+      clearError: true,
+      isRunning: false,
+    );
+  }
+
   void clear() {
-    state = SearchQueryState(layerId: state.layerId);
+    state = SearchQueryState(
+      layerId: state.layerId,
+      caseSensitive: state.caseSensitive,
+    );
   }
 }

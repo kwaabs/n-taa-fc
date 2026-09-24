@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,7 +26,8 @@ func NewTippecanoeClient(baseURL string) *TippecanoeClient {
 	return &TippecanoeClient{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 5 * time.Minute, // large layers can take a while
+			// Large AOI layers (100k+ features) can take a long time.
+			Timeout: 30 * time.Minute,
 		},
 	}
 }
@@ -48,21 +50,58 @@ func DefaultTileParams(layerName, geomType string) TileGenParams {
 	}
 }
 
-// GenerateTiles pipes GeoJSON features to tippecanoe and returns .mbtiles bytes.
-// features should be a slice of standard GeoJSON Feature dicts.
-// Returns an error if the sidecar is unreachable or tippecanoe fails.
-func (c *TippecanoeClient) GenerateTiles(features []map[string]interface{}, params TileGenParams) ([]byte, error) {
+// featuresForTiles keeps geometry plus tap-identifiers in tile properties.
+// Full attributes stay in SQLite (reference_search index). Use plain `fc_ref`
+// (not underscore-prefixed) — some MapLibre query paths omit `_`-keys.
+func featuresForTiles(features []map[string]interface{}) []map[string]interface{} {
+	out := make([]map[string]interface{}, len(features))
+	for i, f := range features {
+		props := map[string]interface{}{}
+		var ref string
+		if rawProps, ok := f["properties"].(map[string]interface{}); ok {
+			if v := rawProps["_source_ref"]; v != nil {
+				ref = fmt.Sprint(v)
+			}
+			if ref == "" {
+				if v := rawProps["fc_ref"]; v != nil {
+					ref = fmt.Sprint(v)
+				}
+			}
+		}
+		if ref == "" {
+			if id, ok := f["id"]; ok && id != nil {
+				ref = fmt.Sprint(id)
+			}
+		}
+		if ref != "" {
+			props["fc_ref"] = ref
+			// Keep legacy key for older mobile builds.
+			props["_source_ref"] = ref
+		}
+		tile := map[string]interface{}{
+			"type":       "Feature",
+			"geometry":   f["geometry"],
+			"properties": props,
+		}
+		if id, ok := f["id"]; ok {
+			tile["id"] = id
+		}
+		out[i] = tile
+	}
+	return out
+}
+
+// GenerateTiles sends minimal GeoJSON features as NDJSON to tippecanoe and returns
+// .mbtiles bytes. The body is buffered with Content-Length (not chunked streaming)
+// because chunked uploads to the Python sidecar were stalling mid-transfer on
+// Windows/Docker for large linked-table layers.
+func (c *TippecanoeClient) GenerateTiles(
+	ctx context.Context,
+	features []map[string]interface{},
+	params TileGenParams,
+) ([]byte, error) {
 	if len(features) == 0 {
 		return nil, fmt.Errorf("no features to tile")
-	}
-
-	// Encode features as newline-delimited JSON — tippecanoe reads this efficiently
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	for _, f := range features {
-		if err := enc.Encode(f); err != nil {
-			return nil, fmt.Errorf("encode feature: %w", err)
-		}
 	}
 
 	url := fmt.Sprintf(
@@ -70,22 +109,42 @@ func (c *TippecanoeClient) GenerateTiles(features []map[string]interface{}, para
 		c.baseURL, params.MinZoom, params.MaxZoom, params.LayerName, params.GeometryType,
 	)
 
+	tileFeatures := featuresForTiles(features)
+	var body bytes.Buffer
+	body.Grow(len(tileFeatures) * 256)
+	enc := json.NewEncoder(&body)
+	for i, f := range tileFeatures {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if err := enc.Encode(f); err != nil {
+			return nil, fmt.Errorf("encode feature %d: %w", i, err)
+		}
+	}
+
 	slog.Info("tippecanoe: generating tiles",
-		"features", len(features),
+		"features", len(tileFeatures),
 		"layer", params.LayerName,
 		"zoom", fmt.Sprintf("%d-%d", params.MinZoom, params.MaxZoom),
-		"size_kb", buf.Len()/1024,
+		"ndjson_kb", body.Len()/1024,
 	)
 
 	start := time.Now()
-	resp, err := c.httpClient.Post(url, "application/json", &buf)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body.Bytes()))
+	if err != nil {
+		return nil, fmt.Errorf("tippecanoe request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-ndjson")
+	req.ContentLength = int64(body.Len())
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("tippecanoe request: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		errBody, _ := io.ReadAll(resp.Body)
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, fmt.Errorf("tippecanoe %d: %s", resp.StatusCode, string(errBody))
 	}
 

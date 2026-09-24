@@ -16,6 +16,8 @@ type GeoStyle struct {
 	Point   *GeoPointStyle   `json:"point,omitempty"`
 	Line    *GeoLineStyle    `json:"line,omitempty"`
 	Polygon *GeoPolygonStyle `json:"polygon,omitempty"`
+	// FC-only fields stored alongside geo symbology (zoom range, etc.).
+	FCVisibility *model.Visibility `json:"fc_visibility,omitempty"`
 }
 
 type GeoPointStyle struct {
@@ -23,6 +25,8 @@ type GeoPointStyle struct {
 	Size     *float64 `json:"size,omitempty"`
 	Color    string   `json:"color,omitempty"`
 	RenderAs string   `json:"render_as,omitempty"`
+	// Optional custom SVG; when set, overrides the embedded pack icon.
+	IconSvg string `json:"icon_svg,omitempty"`
 }
 
 type GeoLineStyle struct {
@@ -100,6 +104,9 @@ func MapToFC(raw json.RawMessage, geometryType string) (*model.LayerStyle, error
 			applyPolygon(out, geo.Polygon)
 		}
 	}
+	if geo.FCVisibility != nil {
+		out.Visibility = geo.FCVisibility
+	}
 	return out, nil
 }
 
@@ -114,6 +121,15 @@ func applyPoint(out *model.LayerStyle, p *GeoPointStyle) {
 			px = 14
 		}
 		out.Default.Size = &px
+	}
+	if strings.TrimSpace(p.IconSvg) != "" {
+		out.Default.IconSvg = tintSVG(p.IconSvg, p.Color)
+		if p.Icon != "" {
+			out.Default.Icon = "geo:" + p.Icon
+		} else {
+			out.Default.Icon = "custom:svg"
+		}
+		return
 	}
 	if p.Icon != "" {
 		if svg, ok := SymbolSVG(p.Icon); ok {

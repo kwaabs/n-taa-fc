@@ -7,6 +7,8 @@ import { buildMapStyle } from "@/lib/basemaps";
 import {
   computeFeatureStyle,
   getLabelText,
+  isMapZoomInLayerRange,
+  layerZoomRange,
   type LayerStyle,
 } from "@/lib/style-engine";
 import { iconToDataUrl } from "@/lib/icon-renderer";
@@ -126,6 +128,7 @@ export function FocusedMapView({
   onSelectFeatureRef.current = onSelectFeature;
   // Fit-to-data only when visibility/focus changes — not on every re-render.
   const fittedForKeyRef = useRef<string>("");
+  const markerZoomHandlerRef = useRef<(() => void) | null>(null);
 
   const { data: project } = useQuery({
     queryKey: ["project", projectId],
@@ -230,6 +233,10 @@ export function FocusedMapView({
         if (map.getSource(id)) map.removeSource(id);
       }
       for (const m of markersRef.current) m.remove();
+      if (markerZoomHandlerRef.current) {
+        map.off("zoom", markerZoomHandlerRef.current);
+        markerZoomHandlerRef.current = null;
+      }
       layerIdsRef.current = [];
       sourceIdsRef.current = [];
       markersRef.current = [];
@@ -241,6 +248,7 @@ export function FocusedMapView({
         if (!visibleLayers[ld.id]) continue;
         const dimmed =
           focusedLayerId !== null && focusedLayerId !== ld.id;
+        const zoomRange = layerZoomRange(ld.style);
 
         // ── Reference layer: use Martin vector tiles ─────────────────
         // ── Reference layer: use Martin vector tiles (scales to 100k+ features) ──
@@ -291,6 +299,8 @@ export function FocusedMapView({
               type: "line",
               source: sourceId,
               "source-layer": sourceLayerName,
+              minzoom: zoomRange.minzoom,
+              maxzoom: zoomRange.maxzoom,
               paint: {
                 "line-color": color,
                 "line-width": width,
@@ -304,6 +314,8 @@ export function FocusedMapView({
               type: "fill",
               source: sourceId,
               "source-layer": sourceLayerName,
+              minzoom: zoomRange.minzoom,
+              maxzoom: zoomRange.maxzoom,
               paint: {
                 "fill-color": color,
                 "fill-opacity": Math.min(opacity, 0.4),
@@ -326,6 +338,8 @@ export function FocusedMapView({
                     type: "symbol",
                     source: sourceId,
                     "source-layer": sourceLayerName,
+                    minzoom: zoomRange.minzoom,
+                    maxzoom: zoomRange.maxzoom,
                     layout: {
                       "icon-image": imgId,
                       "icon-size": 0.15,
@@ -343,6 +357,8 @@ export function FocusedMapView({
                     type: "circle",
                     source: sourceId,
                     "source-layer": sourceLayerName,
+                    minzoom: zoomRange.minzoom,
+                    maxzoom: zoomRange.maxzoom,
                     paint: {
                       "circle-color": color,
                       "circle-radius": 4,
@@ -359,6 +375,8 @@ export function FocusedMapView({
                 type: "circle",
                 source: sourceId,
                 "source-layer": sourceLayerName,
+                minzoom: zoomRange.minzoom,
+                maxzoom: zoomRange.maxzoom,
                 paint: {
                   "circle-color": color,
                   "circle-radius": 4,
@@ -512,6 +530,8 @@ export function FocusedMapView({
             id: layerId,
             type: "line",
             source: sourceId,
+            minzoom: zoomRange.minzoom,
+            maxzoom: zoomRange.maxzoom,
             paint: {
               "line-color": lineColor,
               "line-width": lineWidth,
@@ -579,6 +599,8 @@ export function FocusedMapView({
             id: fillId,
             type: "fill",
             source: sourceId,
+            minzoom: zoomRange.minzoom,
+            maxzoom: zoomRange.maxzoom,
             paint: {
               "fill-color": fillColor,
               "fill-opacity": fillOpacity,
@@ -590,6 +612,8 @@ export function FocusedMapView({
             id: outlineId,
             type: "line",
             source: sourceId,
+            minzoom: zoomRange.minzoom,
+            maxzoom: zoomRange.maxzoom,
             paint: {
               "line-color": strokeColor,
               "line-width": baseLineWidth,
@@ -634,6 +658,21 @@ export function FocusedMapView({
         map.fitBounds(bounds, { padding: 80, maxZoom: 15 });
         fittedForKeyRef.current = fitKey;
       }
+
+      const syncMarkersToZoom = () => {
+        const z = map.getZoom();
+        for (const m of markersRef.current) {
+          const el = m.getElement();
+          const min = Number(el.dataset.layerMinZoom ?? "0");
+          const max = Number(el.dataset.layerMaxZoom ?? "22");
+          const show = z >= min && z < max;
+          el.style.display = show ? "" : "none";
+          el.style.pointerEvents = show ? "" : "none";
+        }
+      };
+      markerZoomHandlerRef.current = syncMarkersToZoom;
+      map.on("zoom", syncMarkersToZoom);
+      syncMarkersToZoom();
     };
 
     // We must wait for the style to load before adding sources/layers.
@@ -886,6 +925,13 @@ function renderPointMarker(args: {
     if (!isFiniteCoord(lng, lat)) continue;
 
     const el = buildMarker(computed, label, dimmed);
+    const range = layerZoomRange(style);
+    el.dataset.layerMinZoom = String(range.minzoom);
+    el.dataset.layerMaxZoom = String(range.maxzoom);
+    if (!isMapZoomInLayerRange(map.getZoom(), style)) {
+      el.style.display = "none";
+      el.style.pointerEvents = "none";
+    }
     el.addEventListener("click", () =>
       onSelectFeature({
         ...feature,

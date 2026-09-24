@@ -97,6 +97,10 @@ const _kAllowedGeomTypes = <String>{
   'MultiPolygon',
 };
 
+/// Loads ALL reference features for a project into memory.
+///
+/// **Do not watch this on the map screen** — it OOM-kills devices on large
+/// multi-layer projects. Prefer mbtiles + [loadReferenceFeaturesForLayer].
 final localReferenceFeaturesProvider =
     FutureProvider.family<List<LocalMapFeature>, String>(
         (ref, projectId) async {
@@ -235,11 +239,6 @@ final localCollectedFeaturesProvider =
 
   debugPrint('[map] localCollectedFeaturesProvider returned ${features.length} '
       'features for project $projectId');
-  for (final f in features) {
-    debugPrint('  - ${f.id.substring(0, 8)} '
-        'layerId=${f.layerId.substring(0, 8)} '
-        'type=${f.geometry['type']}');
-  }
 
   return features;
 });
@@ -257,6 +256,172 @@ final localLayerNamesProvider =
     for (final row in rows) row.id: row.name,
   };
 });
+
+/// Lightweight layer metadata for map render (avoids loading all geometries).
+class LocalLayerMeta {
+  final String id;
+  final String name;
+  final String geometryType;
+
+  const LocalLayerMeta({
+    required this.id,
+    required this.name,
+    required this.geometryType,
+  });
+}
+
+final localLayersMetaProvider =
+    FutureProvider.family<List<LocalLayerMeta>, String>((ref, projectId) async {
+  final db = ref.watch(appDatabaseProvider);
+  if (db == null) return const [];
+
+  final rows = await (db.select(db.layers)
+        ..where((l) => l.projectId.equals(projectId)))
+      .get();
+
+  return [
+    for (final row in rows)
+      LocalLayerMeta(
+        id: row.id,
+        name: row.name,
+        geometryType: row.geometryType,
+      ),
+  ];
+});
+
+/// Layer ids that have local reference edits/tombstones (must use GeoJSON).
+Future<Set<String>> loadOverrideLayerIds(
+  AppDatabase db,
+  String projectId,
+) async {
+  final overrideRows = await (db.select(db.collectedFeatures)
+        ..where((c) => c.projectId.equals(projectId))
+        ..where((c) => c.sourceRef.isNotNull())
+        ..where((c) => c.layerId.isNotNull()))
+      .get();
+  return {
+    for (final r in overrideRows)
+      if (r.layerId != null) r.layerId!,
+  };
+}
+
+/// Soft ceiling for in-memory GeoJSON per layer. Beyond this, map must use
+/// mbtiles (or truncate) — decoding 50k+ features kills mid-range phones.
+const kMaxGeoJsonFeaturesPerLayer = 12000;
+
+/// Collected (non-reference) features for one layer — avoids loading the
+/// whole project on every incremental map update.
+Future<List<LocalMapFeature>> loadCollectedFeaturesForLayer(
+  AppDatabase db,
+  String projectId,
+  String layerId,
+) async {
+  final rows = await (db.select(db.collectedFeatures)
+        ..where((r) => r.projectId.equals(projectId))
+        ..where((r) => r.layerId.equals(layerId))
+        ..where((r) => r.status.isNotIn(['draft']))
+        ..where((r) => r.deletedAt.isNull()))
+      .get();
+
+  final features = <LocalMapFeature>[];
+  for (final row in rows) {
+    try {
+      final geomRaw = row.geometry;
+      if (geomRaw == null || geomRaw.isEmpty) continue;
+
+      final geomDecoded = jsonDecode(geomRaw);
+      if (geomDecoded is! Map) continue;
+      final geom = Map<String, dynamic>.from(geomDecoded);
+      final type = geom['type'];
+      if (type is! String || !_kAllowedGeomTypes.contains(type)) continue;
+      if (geom['coordinates'] == null) continue;
+
+      Map<String, dynamic> attrs = const {};
+      try {
+        final attrsRaw = row.attributes;
+        if (attrsRaw.isNotEmpty) {
+          final attrsDecoded = jsonDecode(attrsRaw);
+          if (attrsDecoded is Map) {
+            attrs = Map<String, dynamic>.from(attrsDecoded);
+          }
+        }
+      } catch (_) {}
+
+      features.add(
+        LocalMapFeature(
+          id: row.clientId,
+          projectId: row.projectId,
+          layerId: layerId,
+          sourceRef: row.sourceRef,
+          geometry: geom,
+          attributes: attrs,
+          source: 'collected',
+          dataSourceId: row.dataSourceId,
+        ),
+      );
+    } catch (_) {}
+  }
+  return features;
+}
+
+/// Load + decode reference features for a single layer (feature inspect / search).
+/// Map rendering uses mbtiles only — do not call this to paint reference layers.
+Future<List<LocalMapFeature>> loadReferenceFeaturesForLayer(
+  AppDatabase db,
+  String projectId,
+  String layerId, {
+  int limit = kMaxGeoJsonFeaturesPerLayer,
+}) async {
+  final overrideRows = await (db.select(db.collectedFeatures)
+        ..where((c) => c.projectId.equals(projectId))
+        ..where((c) => c.sourceRef.isNotNull())
+        ..where((c) => c.layerId.equals(layerId)))
+      .get();
+  final overriddenKeys = <String>{
+    for (final r in overrideRows)
+      if (r.sourceRef != null) '${r.layerId}|${r.sourceRef}',
+  };
+
+  final query = db.select(db.referenceFeatures)
+    ..where((r) => r.projectId.equals(projectId))
+    ..where((r) => r.layerId.equals(layerId))
+    ..limit(limit);
+  final rows = await query.get();
+
+  final features = <LocalMapFeature>[];
+  for (final row in rows) {
+    try {
+      if (row.sourceRef != null &&
+          overriddenKeys.contains('${row.layerId}|${row.sourceRef}')) {
+        continue;
+      }
+
+      final geomDecoded = jsonDecode(row.geometry);
+      final attrsDecoded = jsonDecode(row.attributes);
+      if (geomDecoded is! Map || attrsDecoded is! Map) continue;
+
+      final geom = Map<String, dynamic>.from(geomDecoded);
+      final attrs = Map<String, dynamic>.from(attrsDecoded);
+      final type = geom['type'];
+      if (type is! String || !_kAllowedGeomTypes.contains(type)) continue;
+      if (geom['coordinates'] == null) continue;
+
+      features.add(
+        LocalMapFeature(
+          id: row.id,
+          projectId: row.projectId,
+          layerId: row.layerId,
+          sourceRef: row.sourceRef,
+          geometry: geom,
+          attributes: attrs,
+          source: 'reference',
+          dataSourceId: row.dataSourceId,
+        ),
+      );
+    } catch (_) {}
+  }
+  return features;
+}
 
 final localLayerStylesProvider =
     FutureProvider.family<Map<String, dynamic>, String>((ref, projectId) async {
@@ -301,3 +466,15 @@ final layerTilesPathProvider =
   } catch (_) {}
   return null;
 });
+
+/// Refresh map layer/tile caches after bundle seed or project download.
+void invalidateProjectMapProviders(
+  void Function(ProviderOrFamily provider) invalidate,
+  String projectId,
+) {
+  invalidate(localLayersMetaProvider(projectId));
+  invalidate(localLayerNamesProvider(projectId));
+  invalidate(localLayerStylesProvider(projectId));
+  invalidate(localCollectedFeaturesProvider(projectId));
+  invalidate(layerTilesPathProvider);
+}

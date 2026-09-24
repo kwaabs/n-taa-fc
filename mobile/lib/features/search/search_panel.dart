@@ -1,25 +1,34 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../map/map_providers.dart';
 import 'condition_row.dart';
+import 'coordinate_parser.dart';
 import 'results_list.dart';
 import 'search_repository.dart';
 import 'search_state.dart';
+
+typedef GoToLocationCallback = void Function(double lat, double lng);
 
 /// The full search panel — layer picker + condition builder + results.
 ///
 /// Consumers pass an [onResultTap] handler to receive tap events on
 /// individual result rows (typically opens the feature detail drawer
-/// or centers the map).
+/// or centers the map). Optional [onResultDirections] adds a directions
+/// action on each row.
 class SearchPanel extends ConsumerWidget {
   final String projectId;
   final ResultTapCallback onResultTap;
+  final ResultTapCallback? onResultDirections;
+  final GoToLocationCallback? onGoToLocation;
 
   const SearchPanel({
     super.key,
     required this.projectId,
     required this.onResultTap,
+    this.onResultDirections,
+    this.onGoToLocation,
   });
 
   @override
@@ -39,6 +48,13 @@ class SearchPanel extends ConsumerWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (onGoToLocation != null) ...[
+            _GoToCoordinates(onGoTo: onGoToLocation!),
+            const SizedBox(height: 16),
+            const Divider(height: 1),
+            const SizedBox(height: 16),
+          ],
+
           // Layer picker
           _sectionTitle(context, 'Layer'),
           const SizedBox(height: 6),
@@ -92,6 +108,11 @@ class SearchPanel extends ConsumerWidget {
               ),
             )
           else ...[
+            _SearchIndexBanner(
+              projectId: projectId,
+              layerId: state.layerId!,
+            ),
+            const SizedBox(height: 8),
             // Conditions — natural height, scrolls with the outer view
             ...state.conditions.map(
               (c) => ConditionRow(
@@ -107,6 +128,26 @@ class SearchPanel extends ConsumerWidget {
               onPressed: notifier.addCondition,
               icon: const Icon(Icons.add, size: 18),
               label: const Text('Add condition'),
+            ),
+
+            CheckboxListTile(
+              value: state.caseSensitive,
+              onChanged: (v) => notifier.setCaseSensitive(v ?? false),
+              title: const Text('Case sensitive'),
+              subtitle: Text(
+                state.caseSensitive
+                    ? 'Match exact letter case'
+                    : 'Ignore letter case (recommended)',
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+              controlAffinity: ListTileControlAffinity.leading,
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              visualDensity: VisualDensity.compact,
+              tileColor: theme.colorScheme.surfaceContainerHighest
+                  .withValues(alpha: 0.35),
             ),
 
             const SizedBox(height: 8),
@@ -172,6 +213,7 @@ class SearchPanel extends ConsumerWidget {
               _InlineResults(
                 results: state.results!,
                 onResultTap: onResultTap,
+                onResultDirections: onResultDirections,
               ),
             ],
           ],
@@ -208,6 +250,7 @@ class SearchPanel extends ConsumerWidget {
         projectId: projectId,
         layerId: state.layerId!,
         conditions: state.conditions,
+        caseSensitive: state.caseSensitive,
       );
       notifier.setResults(results);
     } catch (e) {
@@ -217,10 +260,65 @@ class SearchPanel extends ConsumerWidget {
 
   String _prettyError(dynamic e) {
     final msg = e.toString();
-    if (msg.contains('json_extract')) {
+    if (msg.contains('json_extract') || msg.contains('json_each')) {
       return 'SQL error running query. Check attribute names.';
     }
     return 'Search failed: $msg';
+  }
+}
+
+/// Warns when the layer pack has no local search index (SQLite rows).
+class _SearchIndexBanner extends ConsumerWidget {
+  final String projectId;
+  final String layerId;
+
+  const _SearchIndexBanner({
+    required this.projectId,
+    required this.layerId,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final countAsync = ref.watch(
+      searchIndexCountProvider((projectId: projectId, layerId: layerId)),
+    );
+
+    return countAsync.when(
+      loading: () => const SizedBox.shrink(),
+      error: (_, __) => const SizedBox.shrink(),
+      data: (count) {
+        if (count > 0) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.all(10),
+          decoration: BoxDecoration(
+            color: theme.colorScheme.tertiaryContainer,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(
+                Icons.cloud_download_outlined,
+                size: 18,
+                color: theme.colorScheme.onTertiaryContainer,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'No offline search data for this layer. Re-download the '
+                  'project (or open the map and wait for layer packs) after '
+                  'updating the server.',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onTertiaryContainer,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
 }
 
@@ -229,11 +327,13 @@ class SearchPanel extends ConsumerWidget {
 class _InlineResults extends StatelessWidget {
   final List<SearchResult> results;
   final ResultTapCallback onResultTap;
+  final ResultTapCallback? onResultDirections;
   final int maxDisplay;
 
   const _InlineResults({
     required this.results,
     required this.onResultTap,
+    this.onResultDirections,
     this.maxDisplay = 200,
   });
 
@@ -314,6 +414,9 @@ class _InlineResults extends StatelessWidget {
           _InlineResultRow(
             result: displayed[i],
             onTap: () => onResultTap(displayed[i]),
+            onDirections: onResultDirections == null
+                ? null
+                : () => onResultDirections!(displayed[i]),
           ),
         ],
       ],
@@ -324,10 +427,12 @@ class _InlineResults extends StatelessWidget {
 class _InlineResultRow extends StatelessWidget {
   final SearchResult result;
   final VoidCallback onTap;
+  final VoidCallback? onDirections;
 
   const _InlineResultRow({
     required this.result,
     required this.onTap,
+    this.onDirections,
   });
 
   @override
@@ -374,14 +479,148 @@ class _InlineResultRow extends StatelessWidget {
                 ],
               ),
             ),
-            Icon(
-              Icons.arrow_forward_ios,
-              size: 14,
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+            if (onDirections != null)
+              IconButton(
+                tooltip: 'Directions',
+                onPressed: onDirections,
+                icon: Icon(
+                  Icons.directions,
+                  size: 20,
+                  color: theme.colorScheme.primary,
+                ),
+                visualDensity: VisualDensity.compact,
+              )
+            else
+              Icon(
+                Icons.arrow_forward_ios,
+                size: 14,
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// Compact "go to lat / lng" control for the search panel.
+///
+/// Two numeric fields so the device shows a number pad (digits + decimal)
+/// without a letter keyboard. Comma-as-decimal is normalized on parse.
+class _GoToCoordinates extends StatefulWidget {
+  final GoToLocationCallback onGoTo;
+
+  const _GoToCoordinates({required this.onGoTo});
+
+  @override
+  State<_GoToCoordinates> createState() => _GoToCoordinatesState();
+}
+
+class _GoToCoordinatesState extends State<_GoToCoordinates> {
+  final _latController = TextEditingController();
+  final _lngController = TextEditingController();
+  final _lngFocus = FocusNode();
+  String? _error;
+
+  static final _coordFilter =
+      FilteringTextInputFormatter.allow(RegExp(r'[0-9.,\-]'));
+
+  @override
+  void dispose() {
+    _latController.dispose();
+    _lngController.dispose();
+    _lngFocus.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final parsed = parseLatLngPair(_latController.text, _lngController.text);
+    if (parsed == null) {
+      setState(() {
+        _error = 'Enter valid latitude (−90…90) and longitude (−180…180)';
+      });
+      return;
+    }
+    setState(() => _error = null);
+    FocusScope.of(context).unfocus();
+    widget.onGoTo(parsed.$1, parsed.$2);
+  }
+
+  InputDecoration _fieldDecoration(String label, String hint) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      border: const OutlineInputBorder(),
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(
+        horizontal: 10,
+        vertical: 10,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text(
+          'Go to location',
+          style: theme.textTheme.labelMedium?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _latController,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                  signed: true,
+                ),
+                textInputAction: TextInputAction.next,
+                onSubmitted: (_) => _lngFocus.requestFocus(),
+                inputFormatters: [_coordFilter],
+                decoration: _fieldDecoration('Lat', '5.6037'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: TextField(
+                controller: _lngController,
+                focusNode: _lngFocus,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                  signed: true,
+                ),
+                textInputAction: TextInputAction.go,
+                onSubmitted: (_) => _submit(),
+                inputFormatters: [_coordFilter],
+                decoration: _fieldDecoration('Lng', '-0.1870'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton.tonalIcon(
+              onPressed: _submit,
+              icon: const Icon(Icons.my_location, size: 18),
+              label: const Text('Go'),
+            ),
+          ],
+        ),
+        if (_error != null) ...[
+          const SizedBox(height: 6),
+          Text(
+            _error!,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.error,
+            ),
+          ),
+        ],
+      ],
     );
   }
 }

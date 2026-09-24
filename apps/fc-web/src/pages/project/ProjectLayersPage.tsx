@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { Plus, Trash2, Send, RotateCcw, Database } from "lucide-react";
 import { ImportWizard } from "@/components/import-wizard/ImportWizard";
+import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 
 export function ProjectLayersPage() {
   const { projectId } = useParams();
@@ -14,6 +15,10 @@ export function ProjectLayersPage() {
   const navigate = useNavigate();
   const [showImportWizard, setShowImportWizard] = useState(false);
   const [busyLayerId, setBusyLayerId] = useState<string | null>(null);
+  const [unpublishTarget, setUnpublishTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
 
   const { data: layers } = useQuery({
     queryKey: ["layers", projectId],
@@ -72,19 +77,13 @@ export function ProjectLayersPage() {
     }
   }
 
-  async function unpublishLayer(layer: any) {
+  async function unpublishLayer(layer: { id: string; name: string }) {
     if (!projectId) return;
-    if (
-      !confirm(
-        "Unpublishing will hide this layer from field workers. Continue?"
-      )
-    ) {
-      return;
-    }
     setBusyLayerId(layer.id);
     try {
       await api.unpublishLayer(projectId, layer.id);
       await invalidateLayers();
+      setUnpublishTarget(null);
     } catch (e: any) {
       alert(e?.message || "Unpublish failed");
     } finally {
@@ -183,7 +182,9 @@ export function ProjectLayersPage() {
                           type="button"
                           title="Unpublish"
                           disabled={busy}
-                          onClick={() => unpublishLayer(l)}
+                          onClick={() =>
+                            setUnpublishTarget({ id: l.id, name: l.name })
+                          }
                           className="inline-flex items-center gap-1 rounded border border-gray-300 px-2 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                         >
                           <RotateCcw className="h-3.5 w-3.5" />
@@ -299,6 +300,26 @@ export function ProjectLayersPage() {
           }}
         />
       )}
+
+      <ConfirmDialog
+        open={unpublishTarget !== null}
+        title="Unpublish layer?"
+        message={
+          unpublishTarget
+            ? `“${unpublishTarget.name}” will be hidden from field workers. You can edit it again while it is in draft.`
+            : ""
+        }
+        confirmLabel="Unpublish"
+        cancelLabel="Cancel"
+        destructive
+        loading={
+          unpublishTarget !== null && busyLayerId === unpublishTarget.id
+        }
+        onConfirm={() => {
+          if (unpublishTarget) unpublishLayer(unpublishTarget);
+        }}
+        onCancel={() => setUnpublishTarget(null)}
+      />
     </div>
   );
 }

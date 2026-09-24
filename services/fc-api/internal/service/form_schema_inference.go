@@ -38,15 +38,19 @@ var systemColumnNames = map[string]struct{}{
     "last_edited_user": {},
     "last_edited_date": {},
 
-    // ArcGIS / Esri tracking columns
+    // ArcGIS / Esri / OGC identity columns (never collectible in FC forms)
     "device_id":         {},
     "objectid":         {},
+    "object_id":        {},
     "globalid":         {},
+    "global_id":        {},
     "ogc_fid":          {},
+    "fid":              {},
     "shape_length":     {},
     "shape_area":       {},
     "geometry":         {},
     "geom":             {},
+    "the_geom":         {},
     "unique_id_hidden": {},
 }
 
@@ -58,9 +62,8 @@ var systemColumnPrefixes = []string{
     "geom_",   // PostGIS geometry helpers
 }
 
-// IsSystemColumn returns true if the column should be treated as system metadata.
-// System columns are still generated as fields, but are flagged with meta.system=true
-// so the UI can hide them. They never default to required.
+// IsSystemColumn returns true if the column is identity/audit/geometry metadata
+// and must not appear as a collectible field on linked-table forms.
 func IsSystemColumn(name string) bool {
     lower := strings.ToLower(name)
     if _, ok := systemColumnNames[lower]; ok {

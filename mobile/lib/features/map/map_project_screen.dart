@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' show Rect, ImageByteFormat;
+import 'package:drift/drift.dart' show Variable;
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:maplibre_gl/maplibre_gl.dart';
@@ -11,6 +13,8 @@ import 'package:geolocator/geolocator.dart';
 
 import '../projects/project_model.dart';
 import '../projects/form_detail_screen.dart';
+import '../projects/bundle_downloader.dart';
+import '../projects/bundle_repository.dart';
 import '../collection/feature_repository.dart';
 import 'capture/add_feature_flow.dart';
 
@@ -34,12 +38,78 @@ import 'my_location_layer.dart';
 import 'tablet_map_legend.dart';
 
 import 'map_providers.dart';
+import 'layer_style_parse.dart';
 import 'map_style.dart';
 
+import '../search/guide_route_service.dart';
 import '../search/search_panel.dart';
 import '../search/search_state.dart';
 
-enum _TabletMode { layers, search }
+enum _TabletMode { layers, search, form, feature }
+
+class _PanelFormArgs {
+  final db.Form form;
+  final String? existingClientId;
+  final Map<String, dynamic>? initialGeometry;
+  final String? initialLayerId;
+  final Map<String, dynamic>? initialAttributes;
+  final String? referenceSourceRef;
+  final String? referenceDataSourceId;
+  final Map<String, dynamic>? referenceOriginalAttributes;
+  final Map<String, dynamic>? referenceOriginalGeometry;
+
+  const _PanelFormArgs({
+    required this.form,
+    this.existingClientId,
+    this.initialGeometry,
+    this.initialLayerId,
+    this.initialAttributes,
+    this.referenceSourceRef,
+    this.referenceDataSourceId,
+    this.referenceOriginalAttributes,
+    this.referenceOriginalGeometry,
+  });
+}
+
+class _PanelFeature {
+  final String? layerId;
+  final String? featureId;
+  final Map<String, dynamic> attributes;
+  final String? source;
+  final String? sourceRef;
+  final String layerName;
+  final String? subtitle;
+  final List<String> keys;
+  final bool layerEditable;
+
+  const _PanelFeature({
+    required this.layerId,
+    required this.featureId,
+    required this.attributes,
+    required this.source,
+    required this.sourceRef,
+    required this.layerName,
+    required this.subtitle,
+    required this.keys,
+    required this.layerEditable,
+  });
+}
+
+class _GuideInfo {
+  final String title;
+  final double? distanceMeters;
+  final double? bearingDegrees;
+  final String hint;
+  final List<GuideDirectionStep> steps;
+
+  const _GuideInfo({
+    required this.title,
+    required this.distanceMeters,
+    required this.bearingDegrees,
+    required this.hint,
+    this.steps = const [],
+  });
+}
 
 class MapProjectScreen extends ConsumerStatefulWidget {
   final Project project;
@@ -57,10 +127,31 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
   MapLibreMapController? _controller;
   bool _styleLoaded = false;
   bool _legendOpen = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      invalidateProjectMapProviders(ref.invalidate, widget.project.id);
+    });
+  }
   // Tablet-only: whether the side panel is expanded (true) or shown as
 // the collapsed icon rail (false).
   bool _tabletPanelExpanded = false;
+  _TabletMode _tabletMode = _TabletMode.layers;
+  _PanelFormArgs? _panelFormArgs;
+  Completer<Map<String, dynamic>?>? _panelFormCompleter;
+  _PanelFeature? _panelFeature;
   bool _rendering = false;
+  String? _layerFetchStatus;
+  bool _fetchingLayers = false;
+  final Set<String> _layerFetchAttempted = {};
+  /// Layers waiting for an incremental map update while a full render runs.
+  final Set<String> _pendingIncrementalLayerIds = {};
+  /// Last render mode per layer: `tiles`, `collected`, or `none`.
+  final Map<String, String> _layerRenderMode = {};
+  /// Serializes MapLibre mutations so incremental + full renders do not overlap.
+  Future<void> _mapRenderChain = Future.value();
   Circle? _candidateCircle; // current candidate marker on the map (if any)
   Circle? _editOriginalCircle; // 🟠 highlighted original position
   Circle? _editProposedCircle; // 🟢 user's proposed new position
@@ -73,6 +164,43 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
 
   /// Temp marker showing the currently-selected search result.
   Circle? _selectedResultMarker;
+  static const _selSrcId = 'fc-feature-selection-src';
+  static const _selHaloLineId = 'fc-feature-selection-halo-line';
+  static const _selCoreLineId = 'fc-feature-selection-core-line';
+  static const _selHaloFillId = 'fc-feature-selection-halo-fill';
+  static const _selPointHaloId = 'fc-feature-selection-point-halo';
+  static const _selPointCoreId = 'fc-feature-selection-point-core';
+  // Found/selected target — purple, distinct from blue "me" and green guide.
+  static const _selCoreColor = '#7C3AED';
+  static const _selHaloColor = '#C4B5FD';
+  final List<String> _selectionOverlayLayerIds = [];
+  bool _selectionOverlayActive = false;
+  Timer? _selectionPulseTimer;
+  double _pulsePhase = 0.0;
+  static const double _selPointHaloMinRadius = 14;
+  static const double _selPointHaloMaxRadius = 26;
+  static const _guideSrcId = 'guide-route-s';
+  static const _guideHaloLayerId = 'guide-route-halo';
+  static const _guideLayerId = 'guide-route-l';
+  static const _guideLineColor = '#22C55E';
+  static const _guideHaloColor = '#86EFAC';
+  static const _guideDashSequence = <List<double>>[
+    [0, 4, 3],
+    [0.5, 4, 2.5],
+    [1, 4, 2],
+    [1.5, 4, 1.5],
+    [2, 4, 1],
+    [2.5, 4, 0.5],
+    [3, 4, 0],
+    [0, 0.5, 3, 3.5],
+  ];
+
+  bool _guideRouteLayerActive = false;
+  Timer? _guideDashTimer;
+  int _guideDashFrame = 0;
+  double _guideLineWidth = 5.0;
+  _GuideInfo? _guideInfo;
+  int _guideRequestId = 0;
 // D6.3b: line/polygon render handles for edit mode
   Line? _editGhostLine;
   Fill? _editGhostFill;
@@ -94,9 +222,6 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
 
   /// When true, rotation + tilt gestures are disabled (map stays north-up).
   bool _rotationLocked = false;
-
-  /// Which tab is active in the tablet side panel (only relevant when expanded).
-  _TabletMode _tabletMode = _TabletMode.layers;
 
   GeomEditState? _editState;
   GeomEditStateLP? _editStateLP;
@@ -124,8 +249,105 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     try {
       _controller?.onFeatureTapped.remove(_handleFeatureTap);
     } catch (_) {}
+    _removeGuideLine();
+    _stopSelectionPulse();
     _myLocationLayer?.stop();
+    final completer = _panelFormCompleter;
+    _panelFormCompleter = null;
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(null);
+    }
     super.dispose();
+  }
+
+  double get _tabletPanelWidth {
+    final narrow = MediaQuery.sizeOf(context).width < 900;
+    if (_tabletMode == _TabletMode.form ||
+        _tabletMode == _TabletMode.feature) {
+      return narrow ? 360.0 : 440.0;
+    }
+    return narrow ? 320.0 : 380.0;
+  }
+
+  /// Opens search and drops previous result list so reopening feels fresh.
+  void _openSearchPanel({bool expandIfNeeded = true}) {
+    ref.read(searchQueryProvider(widget.project.id).notifier).clearResults();
+    unawaited(_clearSelectedResultMarker());
+    unawaited(_clearFeatureSelectionHighlight());
+    setState(() {
+      _tabletMode = _TabletMode.search;
+      if (expandIfNeeded) _tabletPanelExpanded = true;
+    });
+  }
+
+  Widget _buildTabletPanelBody({
+    required AsyncValue<Map<String, String>> layerNamesAsync,
+  }) {
+    switch (_tabletMode) {
+      case _TabletMode.layers:
+        return TabletMapLegend(
+          visible: _visible,
+          layerNamesAsync: layerNamesAsync,
+          onToggle: _toggleLayer,
+        );
+      case _TabletMode.search:
+        return SearchPanel(
+          projectId: widget.project.id,
+          onResultTap: _onSearchResultTap,
+          onResultDirections: _onSearchResultDirections,
+          onGoToLocation: _onGoToLocation,
+        );
+      case _TabletMode.form:
+        final args = _panelFormArgs;
+        if (args == null) {
+          return const Center(child: Text('No form open'));
+        }
+        return FormDetailScreen(
+          key: ValueKey(
+            'panel-form-${args.form.id}-${args.existingClientId ?? 'new'}-'
+            '${args.referenceSourceRef ?? ''}',
+          ),
+          form: args.form,
+          existingClientId: args.existingClientId,
+          initialGeometry: args.initialGeometry,
+          initialLayerId: args.initialLayerId,
+          initialAttributes: args.initialAttributes,
+          referenceSourceRef: args.referenceSourceRef,
+          referenceDataSourceId: args.referenceDataSourceId,
+          referenceOriginalAttributes: args.referenceOriginalAttributes,
+          referenceOriginalGeometry: args.referenceOriginalGeometry,
+          embedded: true,
+          onFinished: _finishPanelForm,
+        );
+      case _TabletMode.feature:
+        final feature = _panelFeature;
+        if (feature == null) {
+          return const Center(child: Text('No feature selected'));
+        }
+        String formatVal(dynamic v) {
+          if (v == null) return '—';
+          if (v is String) return v.isEmpty ? '—' : v;
+          if (v is num || v is bool) return v.toString();
+          try {
+            return jsonEncode(v);
+          } catch (_) {
+            return v.toString();
+          }
+        }
+        return _buildFeatureInspector(
+          layerId: feature.layerId,
+          featureId: feature.featureId,
+          attributes: feature.attributes,
+          source: feature.source,
+          sourceRef: feature.sourceRef,
+          layerName: feature.layerName,
+          subtitle: feature.subtitle,
+          keys: feature.keys,
+          layerEditable: feature.layerEditable,
+          formatVal: formatVal,
+          dismissSheet: false,
+        );
+    }
   }
 
   // ─────────────────────────────────────────────
@@ -141,7 +363,182 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     );
   }
 
-  Future<void> _renderFeatures({bool fitCamera = true}) async {
+  /// MapLibre mbtiles URLs require forward slashes (Windows paths break otherwise).
+  String _mbtilesTileUrl(String absolutePath) {
+    return 'mbtiles://${absolutePath.replaceAll(r'\', '/')}';
+  }
+
+  /// Lazily fetch reference packs for visible layers that have no local tiles.
+  /// Caps auto-download so opening a 100-layer project does not pull everything.
+  /// Does not block the initial map paint — callers should render first, then
+  /// invoke this with [unawaited].
+  Future<void> _ensureVisibleLayerPacks({int maxLayers = 15}) async {
+    if (_fetchingLayers) return;
+    final repo = ref.read(bundleRepositoryProvider);
+    if (repo == null) return;
+    final downloader = ref.read(bundleDownloaderProvider);
+
+    _fetchingLayers = true;
+    try {
+      await downloader.invalidateStaleLayerPacksIfNeeded(widget.project.id);
+      final layers = await ref.read(
+        localLayersMetaProvider(widget.project.id).future,
+      );
+      PacksManifest? manifest;
+      try {
+        manifest = await repo.getPacksManifest(projectId: widget.project.id);
+      } catch (_) {}
+
+      // Always hash-check visible layers. Old code skipped any layer that
+      // already had mbtiles on disk, so stale clustered tiles never refreshed
+      // after server tippecanoe / pack-format changes.
+      final needFetch = <LocalLayerMeta>[];
+      for (final layer in layers) {
+        if (_visible[layer.id] == false) continue;
+        if (_layerFetchAttempted.contains(layer.id)) continue;
+        needFetch.add(layer);
+        if (needFetch.length >= maxLayers) break;
+      }
+
+      var index = 0;
+      for (final layer in needFetch) {
+        index++;
+        if (mounted) {
+          setState(
+            () => _layerFetchStatus =
+                'Map data ${index}/${needFetch.length}: ${layer.name}…',
+          );
+        }
+        try {
+          final beforeTiles = await _tilesPathFor(layer.id);
+          final merged = await downloader.ensureLayerReferencePack(
+            projectId: widget.project.id,
+            layerId: layer.id,
+            repo: repo,
+            remoteHash: manifest?.layerHashes[layer.id],
+          );
+          ref.invalidate(
+            layerTilesPathProvider(
+              (projectId: widget.project.id, layerId: layer.id),
+            ),
+          );
+          final tiles = await _tilesPathFor(layer.id);
+          _layerFetchAttempted.add(layer.id);
+          final refreshed = merged.downloadedBytes > 0 ||
+              (beforeTiles == null && tiles != null);
+          if (tiles != null && refreshed && mounted && _styleLoaded) {
+            // Drop cached tile layers so the new mbtiles are remounted.
+            _layerRenderMode.remove(layer.id);
+            unawaited(
+              _renderFeatures(
+                fitCamera: false,
+                onlyLayerId: layer.id,
+              ),
+            );
+          } else if (tiles == null) {
+            debugPrint(
+              '[map] layer pack for ${layer.id} merged without mbtiles',
+            );
+          }
+        } catch (e) {
+          debugPrint('[map] layer pack fetch failed ${layer.id}: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Could not download ${layer.name}: $e'),
+                duration: const Duration(seconds: 4),
+              ),
+            );
+          }
+        }
+        // Yield so taps/animations can run between layer downloads.
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+    } finally {
+      _fetchingLayers = false;
+      if (mounted) setState(() => _layerFetchStatus = null);
+    }
+  }
+
+  /// Queue map layer work on a single chain so MapLibre calls never overlap.
+  Future<void> _renderFeatures({
+    bool fitCamera = true,
+    String? onlyLayerId,
+  }) {
+    final completer = Completer<void>();
+    _mapRenderChain = _mapRenderChain.then((_) async {
+      try {
+        if (onlyLayerId != null) {
+          await _renderIncrementalLayer(onlyLayerId);
+        } else {
+          await _renderAllLayers(fitCamera: fitCamera);
+        }
+        if (!completer.isCompleted) completer.complete();
+      } catch (e, st) {
+        debugPrint('[map] render failed: $e\n$st');
+        if (!completer.isCompleted) completer.completeError(e, st);
+      }
+    });
+    return completer.future;
+  }
+
+  Future<void> _renderIncrementalLayer(String layerId) async {
+    if (_rendering) {
+      _pendingIncrementalLayerIds.add(layerId);
+      return;
+    }
+    final controller = _controller;
+    if (controller == null || !_styleLoaded) return;
+
+    final database = ref.read(appDatabaseProvider);
+    if (database == null) return;
+
+    final layers = await ref.read(
+      localLayersMetaProvider(widget.project.id).future,
+    );
+    LocalLayerMeta? layerMeta;
+    for (final l in layers) {
+      if (l.id == layerId) {
+        layerMeta = l;
+        break;
+      }
+    }
+    if (layerMeta == null) return;
+    if (_visible[layerId] == false) {
+      await _removeProjectLayerFromMap(controller, layerId);
+      return;
+    }
+
+    final collected = await loadCollectedFeaturesForLayer(
+      database,
+      widget.project.id,
+      layerId,
+    );
+    final collectedByLayer = <String, List<LocalMapFeature>>{
+      layerId: collected,
+    };
+
+    final overrideLayerIds =
+        await loadOverrideLayerIds(database, widget.project.id);
+    final appearances = await _loadLayerAppearances(widget.project.id);
+    final editingSourceRef = _editState?.sourceRef ?? _editStateLP?.sourceRef;
+    final editingLayerId = _editLayerId;
+    final geoBounds = _BoundsAccumulator();
+
+    await _renderProjectLayerOnMap(
+      controller: controller,
+      database: database,
+      layer: layerMeta,
+      collectedByLayer: collectedByLayer,
+      overrideLayerIds: overrideLayerIds,
+      appearances: appearances,
+      editingSourceRef: editingSourceRef,
+      editingLayerId: editingLayerId,
+      geoBounds: geoBounds,
+    );
+  }
+
+  Future<void> _renderAllLayers({bool fitCamera = true}) async {
     if (_rendering) return;
     _rendering = true;
 
@@ -149,71 +546,37 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
       final controller = _controller;
       if (controller == null || !_styleLoaded) return;
 
-      final featuresAsync =
-          ref.read(localReferenceFeaturesProvider(widget.project.id));
-      final allReferenceFeatures =
-          featuresAsync.value ?? const <LocalMapFeature>[];
+      final database = ref.read(appDatabaseProvider);
+      if (database == null) return;
 
-      final collectedAsync =
-          ref.read(localCollectedFeaturesProvider(widget.project.id));
-      final collectedFeatures =
-          collectedAsync.value ?? const <LocalMapFeature>[];
+      // Lightweight metadata only — do NOT load all reference geometries.
+      final layers = await ref.read(
+        localLayersMetaProvider(widget.project.id).future,
+      );
+      final collectedFeatures = await ref.read(
+        localCollectedFeaturesProvider(widget.project.id).future,
+      );
+      final collectedByLayer = <String, List<LocalMapFeature>>{};
+      for (final f in collectedFeatures) {
+        collectedByLayer.putIfAbsent(f.layerId, () => []).add(f);
+      }
 
-      // ── D6.2/D6.3: hide the feature currently being edited ──
-      // The orange marker (point) or live blue overlay (line/polygon) acts
-      // as the visible stand-in. Local-state-driven so it's instant on
-      // enter/exit edit mode — no provider cache lag.
+      final overrideLayerIds =
+          await loadOverrideLayerIds(database, widget.project.id);
+
       final editingSourceRef = _editState?.sourceRef ?? _editStateLP?.sourceRef;
       final editingLayerId = _editLayerId;
-      final referenceFeatures = editingSourceRef == null
-          ? allReferenceFeatures
-          : allReferenceFeatures
-              .where((f) =>
-                  !(f.sourceRef == editingSourceRef &&
-                      (editingLayerId == null || f.layerId == editingLayerId)))
-              .toList();
 
-      // Merge reference + collected. Both render with the same code path.
-      final features = <LocalMapFeature>[
-        ...referenceFeatures,
-        ...collectedFeatures,
-      ];
-      debugPrint('[map] render input: '
-          '${referenceFeatures.length} reference + '
-          '${collectedFeatures.length} collected = '
-          '${features.length} total');
+      final appearances = await _loadLayerAppearances(widget.project.id);
 
-      int dbgPoint = 0, dbgLine = 0, dbgPoly = 0, dbgOther = 0, dbgUnparsed = 0;
-      for (final f in features) {
-        var geom = _asMap(f.geometry);
-        if (geom == null) {
-          dbgUnparsed++;
-          continue;
-        }
-        // 🛡️ Safety guard — promote closed LineStrings to Polygons
-        geom = _maybePromoteClosedLineToPolygon(geom);
-
-        final t = geom['type'];
-        if (t == 'Point' || t == 'MultiPoint') {
-          dbgPoint++;
-        } else if (t == 'LineString' || t == 'MultiLineString') {
-          dbgLine++;
-        } else if (t == 'Polygon' || t == 'MultiPolygon') {
-          dbgPoly++;
-        } else {
-          dbgOther++;
-        }
-      }
       debugPrint(
-          '[map] geomCounts pts=$dbgPoint lines=$dbgLine polys=$dbgPoly other=$dbgOther unparsed=$dbgUnparsed');
-
-      // Pull layer styles via a fresh DB query — see helper below
-      final stylesByLayerId = await _loadLayerStyles(widget.project.id);
-
-      debugPrint('[map] render: ${features.length} features, '
-          'visible=$_visible');
+        '[map] render tiles-first: ${layers.length} layers, '
+        '${collectedFeatures.length} collected, '
+        '${overrideLayerIds.length} override layers',
+      );
 
       await _cleanupAll(controller);
+      _layerRenderMode.clear();
 
       final aoiGeom = await _loadAoiGeometry();
       final aoiBounds = _BoundsAccumulator();
@@ -222,323 +585,544 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
         await _addAoiOverlay(controller, aoiGeom);
       }
 
-      if (features.isEmpty) {
-        if (aoiBounds.hasData) _lastBounds = aoiBounds;
-        if (fitCamera && aoiBounds.hasData) {
-          await _fitToBounds(controller, aoiBounds);
-        }
-        return;
-      }
-
-      final byLayer = <String, _LayerBucket>{};
-      final bounds = _BoundsAccumulator();
-
-      for (final f in features) {
-        var geom = _asMap(f.geometry);
-        if (geom == null) continue;
-
-        // 🛡️ Safety guard — promote closed LineStrings to Polygons
-        geom = _maybePromoteClosedLineToPolygon(geom);
-
-        final type = geom['type'];
-
-        // Respect the legend's visibility toggle. Default to visible
-        // when a layer hasn't been toggled yet.
-        if (_visible[f.layerId] == false) continue;
-
-        final bucket = byLayer.putIfAbsent(f.layerId, () => _LayerBucket());
-        final geoJsonFeature = _geoJsonFeature(geom, f);
-
-        if (type == 'Point' || type == 'MultiPoint') {
-          bucket.points.add(geoJsonFeature);
-        } else if (type == 'LineString' || type == 'MultiLineString') {
-          bucket.lines.add(geoJsonFeature);
-        } else if (type == 'Polygon' || type == 'MultiPolygon') {
-          bucket.polys.add(geoJsonFeature);
-        } else {
-          // Unsupported geometry type — skip.
-          continue;
-        }
-
-        _accumulate(geom, bounds);
-      }
-
-      // Make sure every layer has an entry in _visible so the legend
-      // shows the correct initial state (default: visible).
       if (_visible.isEmpty) {
-        _visible = {for (final id in byLayer.keys) id: true};
+        _visible = {
+          for (final l in layers)
+            l.id: appearances[l.id]?.visibleByDefault ?? true,
+        };
       } else {
-        for (final id in byLayer.keys) {
-          _visible.putIfAbsent(id, () => true);
+        for (final l in layers) {
+          _visible.putIfAbsent(
+            l.id,
+            () => appearances[l.id]?.visibleByDefault ?? true,
+          );
         }
       }
 
-      // Layers with pending local edits/tombstones must use GeoJSON so
-      // mbtiles (immutable snapshot) do not keep showing the old geometry.
-      final db = ref.read(appDatabaseProvider);
-      final overrideLayerIds = <String>{};
-      if (db != null) {
-        final overrideRows = await (db.select(db.collectedFeatures)
-              ..where((c) => c.projectId.equals(widget.project.id))
-              ..where((c) => c.sourceRef.isNotNull())
-              ..where((c) => c.layerId.isNotNull()))
-            .get();
-        for (final r in overrideRows) {
-          if (r.layerId != null) overrideLayerIds.add(r.layerId!);
-        }
+      final geoBounds = _BoundsAccumulator();
+
+      // Pass 1: mbtiles layers first so the map becomes usable quickly.
+      for (final layer in layers) {
+        if (_visible[layer.id] == false) continue;
+        if (await _tilesPathFor(layer.id) == null) continue;
+        await _renderProjectLayerOnMap(
+          controller: controller,
+          database: database,
+          layer: layer,
+          collectedByLayer: collectedByLayer,
+          overrideLayerIds: overrideLayerIds,
+          appearances: appearances,
+          editingSourceRef: editingSourceRef,
+          editingLayerId: editingLayerId,
+          geoBounds: geoBounds,
+        );
+        await Future<void>.delayed(Duration.zero);
       }
 
-      // Build a source + layer (or two, for polygons) per project layer.
-      for (final entry in byLayer.entries) {
-        final projectLayerId = entry.key;
-        final bucket = entry.value;
-        final style = stylesByLayerId[projectLayerId] ?? const {};
-
-        final color = _safeColor(style['color'], '#2563EB');
-        final opacity = _safeDouble(style['opacity'], 0.9);
-        final size = _safeDouble(style['size'], 6);
-        final dashArray =
-            _dashArrayFor(style['line_style'] as String?); // 👈 NEW
-
-        final layerIds = <String>[];
-        final sourceIds = <String>[];
-
-        if (bucket.points.isNotEmpty) {
-          final srcId = _pointSrcId(projectLayerId);
-          final layerId = _pointLayerId(projectLayerId);
-          final iconSvg = style['icon_svg'] as String?;
-          try {
-            final tilesPath = await _tilesPathFor(projectLayerId);
-
-            // Prefer GeoJSON when local overrides exist for this layer.
-            final bool usingTiles =
-                tilesPath != null && !overrideLayerIds.contains(projectLayerId);
-            if (usingTiles) {
-              await controller.addSource(
-                srcId,
-                VectorSourceProperties(
-                  tiles: ['mbtiles://$tilesPath'],
-                  minzoom: 0,
-                  maxzoom: 14,
-                ),
-              );
-            } else {
-              await controller.addSource(
-                srcId,
-                GeojsonSourceProperties(
-                  data: {
-                    'type': 'FeatureCollection',
-                    'features': bucket.points,
-                  },
-                ),
-              );
-            }
-
-            // Try SVG icon; fall back to circle
-            Uint8List? iconBytes;
-            if (iconSvg != null && iconSvg.isNotEmpty) {
-              iconBytes = await _rasterizeSvg(iconSvg, 64);
-            }
-
-            if (iconBytes != null) {
-              final imgId = 'icon-$projectLayerId';
-              try {
-                await controller.addImage(imgId, iconBytes);
-              } catch (_) {
-                // image may already exist from a prior render
-              }
-              await controller.addSymbolLayer(
-                srcId,
-                layerId,
-                SymbolLayerProperties(
-                  iconImage: imgId,
-                  iconSize: 0.5,
-                  iconOpacity: opacity,
-                  iconAllowOverlap: true,
-                  iconIgnorePlacement: true,
-                ),
-                sourceLayer: usingTiles ? 'reference_features' : null,
-              );
-              debugPrint('[map] points via SVG for $projectLayerId');
-            } else {
-              await controller.addCircleLayer(
-                srcId,
-                layerId,
-                CircleLayerProperties(
-                  circleRadius: size / 2,
-                  circleColor: color,
-                  circleOpacity: opacity,
-                  circleStrokeColor: '#FFFFFF',
-                  circleStrokeWidth: 1.5,
-                ),
-                sourceLayer: usingTiles ? 'reference_features' : null,
-              );
-              debugPrint('[map] points via circle for $projectLayerId '
-                  '(tiles=$usingTiles)');
-            }
-            sourceIds.add(srcId);
-            layerIds.add(layerId);
-          } catch (e) {
-            debugPrint('[map] failed to add point layer for '
-                '$projectLayerId: $e');
-          }
-        }
-
-        if (bucket.lines.isNotEmpty) {
-          final srcId = _lineSrcId(projectLayerId);
-          final layerId = _lineLayerId(projectLayerId);
-          try {
-            final tilesPath = await _tilesPathFor(projectLayerId);
-            final bool usingTiles =
-                tilesPath != null && !overrideLayerIds.contains(projectLayerId);
-            if (usingTiles) {
-              // 👇 Vector tiles path — scales to 100k+ features
-              await controller.addSource(
-                srcId,
-                VectorSourceProperties(
-                  tiles: ['mbtiles://$tilesPath'],
-                  minzoom: 0,
-                  maxzoom: 14,
-                ),
-              );
-              await controller.addLineLayer(
-                srcId,
-                layerId,
-                LineLayerProperties(
-                  lineColor: color,
-                  lineWidth: size,
-                  lineOpacity: opacity,
-                  lineDasharray: dashArray, // 👈 NEW (null = solid)
-                ),
-                sourceLayer: 'reference_features',
-              );
-              debugPrint('[map] lines via mbtiles for $projectLayerId');
-            } else {
-              // Fallback GeoJSON path
-              await controller.addSource(
-                srcId,
-                GeojsonSourceProperties(
-                  data: {
-                    'type': 'FeatureCollection',
-                    'features': bucket.lines,
-                  },
-                ),
-              );
-              await controller.addLineLayer(
-                srcId,
-                layerId,
-                LineLayerProperties(
-                  lineColor: color,
-                  lineWidth: size,
-                  lineOpacity: opacity,
-                  lineDasharray: dashArray, // 👈 NEW (null = solid)
-                ),
-              );
-              debugPrint('[map] lines via geojson for $projectLayerId '
-                  '(${bucket.lines.length} features)');
-            }
-            sourceIds.add(srcId);
-            layerIds.add(layerId);
-          } catch (e) {
-            debugPrint('[map] failed to add line layer for '
-                '$projectLayerId: $e');
-          }
-        }
-
-        if (bucket.polys.isNotEmpty) {
-          final srcId = _polySrcId(projectLayerId);
-          final fillId = _polyFillId(projectLayerId);
-          final outlineId = _polyOutlineId(projectLayerId);
-          try {
-            final tilesPath = await _tilesPathFor(projectLayerId);
-            final bool usingTiles =
-                tilesPath != null && !overrideLayerIds.contains(projectLayerId);
-            if (usingTiles) {
-              await controller.addSource(
-                srcId,
-                VectorSourceProperties(
-                  tiles: ['mbtiles://$tilesPath'],
-                  minzoom: 0,
-                  maxzoom: 14,
-                ),
-              );
-              await controller.addFillLayer(
-                srcId,
-                fillId,
-                FillLayerProperties(
-                  fillColor: color,
-                  fillOpacity: opacity * 0.4,
-                ),
-                sourceLayer: 'reference_features',
-              );
-              await controller.addLineLayer(
-                srcId,
-                outlineId,
-                LineLayerProperties(
-                  lineColor: color,
-                  lineWidth: 2.0,
-                  lineOpacity: opacity,
-                  lineDasharray: dashArray, // 👈 NEW (null = solid)
-                ),
-                sourceLayer: 'reference_features',
-              );
-              debugPrint('[map] polygons via mbtiles for $projectLayerId');
-            } else {
-              await controller.addSource(
-                srcId,
-                GeojsonSourceProperties(
-                  data: {
-                    'type': 'FeatureCollection',
-                    'features': bucket.polys,
-                  },
-                ),
-              );
-              await controller.addFillLayer(
-                srcId,
-                fillId,
-                FillLayerProperties(
-                  fillColor: color,
-                  fillOpacity: opacity * 0.4,
-                ),
-              );
-              await controller.addLineLayer(
-                srcId,
-                outlineId,
-                LineLayerProperties(
-                  lineColor: color,
-                  lineWidth: 2.0,
-                  lineOpacity: opacity,
-                  lineDasharray: dashArray, // 👈 NEW (null = solid)
-                ),
-              );
-              debugPrint('[map] polygons via geojson for $projectLayerId '
-                  '(${bucket.polys.length} features)');
-            }
-            sourceIds.add(srcId);
-            layerIds.addAll([fillId, outlineId]);
-          } catch (e) {
-            debugPrint('[map] failed to add polygon layer for '
-                '$projectLayerId: $e');
-          }
-        }
-
-        if (sourceIds.isNotEmpty) {
-          _mapSourceIdsByProjectLayer[projectLayerId] = sourceIds;
-        }
-        if (layerIds.isNotEmpty) {
-          _mapLayerIdsByProjectLayer[projectLayerId] = layerIds;
-        }
+      // Pass 2: layers still waiting on mbtiles (collected overlay only).
+      for (final layer in layers) {
+        if (_visible[layer.id] == false) continue;
+        if (await _tilesPathFor(layer.id) != null) continue;
+        await _renderProjectLayerOnMap(
+          controller: controller,
+          database: database,
+          layer: layer,
+          collectedByLayer: collectedByLayer,
+          overrideLayerIds: overrideLayerIds,
+          appearances: appearances,
+          editingSourceRef: editingSourceRef,
+          editingLayerId: editingLayerId,
+          geoBounds: geoBounds,
+        );
+        await Future<void>.delayed(Duration.zero);
       }
 
-      // Prefer AOI for the initial overview so collectors see the work area.
-      final fitBounds = aoiBounds.hasData ? aoiBounds : bounds;
+      final fitBounds = aoiBounds.hasData ? aoiBounds : geoBounds;
       if (fitBounds.hasData) _lastBounds = fitBounds;
-
       if (fitCamera && fitBounds.hasData) {
         await _fitToBounds(controller, fitBounds);
       }
     } finally {
       _rendering = false;
+      if (_pendingIncrementalLayerIds.isNotEmpty && mounted) {
+        final pending = List<String>.from(_pendingIncrementalLayerIds);
+        _pendingIncrementalLayerIds.clear();
+        for (final id in pending) {
+          unawaited(_renderFeatures(onlyLayerId: id, fitCamera: false));
+        }
+      }
+    }
+  }
+
+  Future<void> _renderProjectLayerOnMap({
+    required MapLibreMapController controller,
+    required db.AppDatabase database,
+    required LocalLayerMeta layer,
+    required Map<String, List<LocalMapFeature>> collectedByLayer,
+    required Set<String> overrideLayerIds,
+    required Map<String, LayerMapAppearance> appearances,
+    required String? editingSourceRef,
+    required String? editingLayerId,
+    required _BoundsAccumulator geoBounds,
+  }) async {
+    final appearance = appearances[layer.id] ?? LayerMapAppearance.fallback;
+    final style = appearance.paint;
+    final color = _safeColor(style['color'], '#2563EB');
+    final opacity = _safeDouble(style['opacity'], 0.9);
+    final size = _safeDouble(style['size'], 6);
+    final dashArray = _dashArrayFor(style['line_style'] as String?);
+    final iconSvg = style['icon_svg'] as String?;
+    final layerMinZoom = appearance.minZoom;
+    final layerMaxZoom = appearance.maxZoom;
+
+    final tilesPath = await _tilesPathFor(layer.id);
+    final hasOverrides = overrideLayerIds.contains(layer.id);
+    final useTiles = tilesPath != null && !hasOverrides;
+
+    if (_layerRenderMode[layer.id] == 'tiles' && useTiles) {
+      return;
+    }
+
+    await _removeProjectLayerFromMap(controller, layer.id);
+
+    if (useTiles) {
+      await _addTiledLayer(
+        controller: controller,
+        projectLayerId: layer.id,
+        geometryType: layer.geometryType,
+        tilesPath: tilesPath,
+        color: color,
+        opacity: opacity,
+        size: size,
+        dashArray: dashArray,
+        iconSvg: iconSvg,
+        layerMinZoom: layerMinZoom,
+        layerMaxZoom: layerMaxZoom,
+      );
+      _layerRenderMode[layer.id] = 'tiles';
+      final collected = collectedByLayer[layer.id] ?? const [];
+      if (collected.isNotEmpty) {
+        final bucket = _bucketFeatures(
+          collected,
+          editingSourceRef: editingSourceRef,
+          editingLayerId: editingLayerId,
+          bounds: geoBounds,
+        );
+        await _addGeoJsonBucket(
+          controller: controller,
+          projectLayerId: layer.id,
+          bucket: bucket,
+          color: color,
+          opacity: opacity,
+          size: size,
+          dashArray: dashArray,
+          iconSvg: iconSvg,
+          sourcePrefix: 'col',
+          layerMinZoom: layerMinZoom,
+          layerMaxZoom: layerMaxZoom,
+        );
+      }
+      return;
+    }
+
+    // Reference geometry is mbtiles-only on mobile — no GeoJSON fallback.
+    final collected = collectedByLayer[layer.id] ?? const [];
+    if (collected.isEmpty) {
+      _layerRenderMode[layer.id] = 'none';
+      return;
+    }
+    final bucket = _bucketFeatures(
+      collected,
+      editingSourceRef: editingSourceRef,
+      editingLayerId: editingLayerId,
+      bounds: geoBounds,
+    );
+    await _addGeoJsonBucket(
+      controller: controller,
+      projectLayerId: layer.id,
+      bucket: bucket,
+      color: color,
+      opacity: opacity,
+      size: size,
+      dashArray: dashArray,
+      iconSvg: iconSvg,
+      sourcePrefix: 'col',
+      layerMinZoom: layerMinZoom,
+      layerMaxZoom: layerMaxZoom,
+    );
+    _layerRenderMode[layer.id] = 'collected';
+  }
+
+  _LayerBucket _bucketFeatures(
+    List<LocalMapFeature> features, {
+    String? editingSourceRef,
+    String? editingLayerId,
+    required _BoundsAccumulator bounds,
+  }) {
+    final bucket = _LayerBucket();
+    for (final f in features) {
+      if (editingSourceRef != null &&
+          f.sourceRef == editingSourceRef &&
+          (editingLayerId == null || f.layerId == editingLayerId)) {
+        continue;
+      }
+      var geom = _asMap(f.geometry);
+      if (geom == null) continue;
+      geom = _maybePromoteClosedLineToPolygon(geom);
+      final type = geom['type'];
+      final geoJsonFeature = _geoJsonFeature(geom, f);
+      if (type == 'Point' || type == 'MultiPoint') {
+        bucket.points.add(geoJsonFeature);
+      } else if (type == 'LineString' || type == 'MultiLineString') {
+        bucket.lines.add(geoJsonFeature);
+      } else if (type == 'Polygon' || type == 'MultiPolygon') {
+        bucket.polys.add(geoJsonFeature);
+      } else {
+        continue;
+      }
+      _accumulate(geom, bounds);
+    }
+    return bucket;
+  }
+
+  /// Map layer geometry_type values to map render buckets.
+  String _normalizeGeometryKind(String raw) {
+    switch (raw.toLowerCase()) {
+      case 'point':
+      case 'multipoint':
+        return 'point';
+      case 'line':
+      case 'linestring':
+      case 'multilinestring':
+        return 'line';
+      case 'polygon':
+      case 'multipolygon':
+        return 'polygon';
+      default:
+        return raw.toLowerCase();
+    }
+  }
+
+  Future<void> _addTiledLayer({
+    required MapLibreMapController controller,
+    required String projectLayerId,
+    required String geometryType,
+    required String tilesPath,
+    required String color,
+    required double opacity,
+    required double size,
+    required List<double>? dashArray,
+    required String? iconSvg,
+    double layerMinZoom = 0,
+    double layerMaxZoom = 22,
+  }) async {
+    final kind = _normalizeGeometryKind(geometryType);
+    final layerIds = <String>[];
+    final sourceIds = <String>[];
+
+    try {
+      if (kind == 'point') {
+        final srcId = _pointSrcId(projectLayerId);
+        final layerId = _pointLayerId(projectLayerId);
+        await controller.addSource(
+          srcId,
+          VectorSourceProperties(
+            tiles: [_mbtilesTileUrl(tilesPath)],
+            minzoom: 0,
+            maxzoom: 16,
+          ),
+        );
+        Uint8List? iconBytes;
+        if (iconSvg != null && iconSvg.isNotEmpty) {
+          iconBytes = await _rasterizeSvg(iconSvg, 64);
+        }
+        if (iconBytes != null) {
+          final imgId = _iconImageId(projectLayerId, color, size);
+          try {
+            await controller.addImage(imgId, iconBytes);
+          } catch (_) {}
+          await controller.addSymbolLayer(
+            srcId,
+            layerId,
+            SymbolLayerProperties(
+              iconImage: imgId,
+              iconSize: _iconSizeFor(size),
+              iconOpacity: opacity,
+              iconAllowOverlap: true,
+              iconIgnorePlacement: true,
+            ),
+            sourceLayer: 'reference_features',
+            minzoom: layerMinZoom,
+            maxzoom: layerMaxZoom,
+          );
+        } else {
+          await controller.addCircleLayer(
+            srcId,
+            layerId,
+            CircleLayerProperties(
+              circleRadius: size / 2,
+              circleColor: color,
+              circleOpacity: opacity,
+              circleStrokeColor: '#FFFFFF',
+              circleStrokeWidth: 1.5,
+            ),
+            sourceLayer: 'reference_features',
+            minzoom: layerMinZoom,
+            maxzoom: layerMaxZoom,
+          );
+        }
+        sourceIds.add(srcId);
+        layerIds.add(layerId);
+        debugPrint('[map] points via mbtiles for $projectLayerId');
+      } else if (kind == 'line') {
+        final srcId = _lineSrcId(projectLayerId);
+        final layerId = _lineLayerId(projectLayerId);
+        await controller.addSource(
+          srcId,
+          VectorSourceProperties(
+            tiles: [_mbtilesTileUrl(tilesPath)],
+            minzoom: 0,
+            maxzoom: 16,
+          ),
+        );
+        await controller.addLineLayer(
+          srcId,
+          layerId,
+          LineLayerProperties(
+            lineColor: color,
+            lineWidth: size,
+            lineOpacity: opacity,
+            lineDasharray: dashArray,
+          ),
+          sourceLayer: 'reference_features',
+          minzoom: layerMinZoom,
+          maxzoom: layerMaxZoom,
+        );
+        sourceIds.add(srcId);
+        layerIds.add(layerId);
+        debugPrint('[map] lines via mbtiles for $projectLayerId');
+      } else if (kind == 'polygon') {
+        final srcId = _polySrcId(projectLayerId);
+        final fillId = _polyFillId(projectLayerId);
+        final outlineId = _polyOutlineId(projectLayerId);
+        await controller.addSource(
+          srcId,
+          VectorSourceProperties(
+            tiles: [_mbtilesTileUrl(tilesPath)],
+            minzoom: 0,
+            maxzoom: 16,
+          ),
+        );
+        await controller.addFillLayer(
+          srcId,
+          fillId,
+          FillLayerProperties(
+            fillColor: color,
+            fillOpacity: opacity * 0.4,
+          ),
+          sourceLayer: 'reference_features',
+          minzoom: layerMinZoom,
+          maxzoom: layerMaxZoom,
+        );
+        await controller.addLineLayer(
+          srcId,
+          outlineId,
+          LineLayerProperties(
+            lineColor: color,
+            lineWidth: 2.0,
+            lineOpacity: opacity,
+            lineDasharray: dashArray,
+          ),
+          sourceLayer: 'reference_features',
+          minzoom: layerMinZoom,
+          maxzoom: layerMaxZoom,
+        );
+        sourceIds.add(srcId);
+        layerIds.addAll([fillId, outlineId]);
+        debugPrint('[map] polygons via mbtiles for $projectLayerId');
+      } else {
+        debugPrint(
+          '[map] unknown geometry_type=$geometryType for $projectLayerId',
+        );
+      }
+    } catch (e) {
+      debugPrint('[map] failed tiled layer $projectLayerId: $e');
+    }
+
+    if (sourceIds.isNotEmpty) {
+      _mapSourceIdsByProjectLayer[projectLayerId] = [
+        ...?_mapSourceIdsByProjectLayer[projectLayerId],
+        ...sourceIds,
+      ];
+    }
+    if (layerIds.isNotEmpty) {
+      _mapLayerIdsByProjectLayer[projectLayerId] = [
+        ...?_mapLayerIdsByProjectLayer[projectLayerId],
+        ...layerIds,
+      ];
+    }
+  }
+
+  Future<void> _addGeoJsonBucket({
+    required MapLibreMapController controller,
+    required String projectLayerId,
+    required _LayerBucket bucket,
+    required String color,
+    required double opacity,
+    required double size,
+    required List<double>? dashArray,
+    required String? iconSvg,
+    String sourcePrefix = '',
+    double layerMinZoom = 0,
+    double layerMaxZoom = 22,
+  }) async {
+    final layerIds = <String>[];
+    final sourceIds = <String>[];
+    final prefix = sourcePrefix.isEmpty ? '' : '$sourcePrefix-';
+
+    if (bucket.points.isNotEmpty) {
+      final srcId = '$prefix${_pointSrcId(projectLayerId)}';
+      final layerId = '$prefix${_pointLayerId(projectLayerId)}';
+      try {
+        await controller.addSource(
+          srcId,
+          GeojsonSourceProperties(
+            data: {
+              'type': 'FeatureCollection',
+              'features': bucket.points,
+            },
+          ),
+        );
+        Uint8List? iconBytes;
+        if (iconSvg != null && iconSvg.isNotEmpty) {
+          iconBytes = await _rasterizeSvg(iconSvg, 64);
+        }
+        if (iconBytes != null) {
+          final imgId = _iconImageId('$prefix$projectLayerId', color, size);
+          try {
+            await controller.addImage(imgId, iconBytes);
+          } catch (_) {}
+          await controller.addSymbolLayer(
+            srcId,
+            layerId,
+            SymbolLayerProperties(
+              iconImage: imgId,
+              iconSize: _iconSizeFor(size),
+              iconOpacity: opacity,
+              iconAllowOverlap: true,
+              iconIgnorePlacement: true,
+            ),
+            minzoom: layerMinZoom,
+            maxzoom: layerMaxZoom,
+          );
+        } else {
+          await controller.addCircleLayer(
+            srcId,
+            layerId,
+            CircleLayerProperties(
+              circleRadius: size / 2,
+              circleColor: color,
+              circleOpacity: opacity,
+              circleStrokeColor: '#FFFFFF',
+              circleStrokeWidth: 1.5,
+            ),
+            minzoom: layerMinZoom,
+            maxzoom: layerMaxZoom,
+          );
+        }
+        sourceIds.add(srcId);
+        layerIds.add(layerId);
+      } catch (e) {
+        debugPrint('[map] geojson points failed $projectLayerId: $e');
+      }
+    }
+
+    if (bucket.lines.isNotEmpty) {
+      final srcId = '$prefix${_lineSrcId(projectLayerId)}';
+      final layerId = '$prefix${_lineLayerId(projectLayerId)}';
+      try {
+        await controller.addSource(
+          srcId,
+          GeojsonSourceProperties(
+            data: {
+              'type': 'FeatureCollection',
+              'features': bucket.lines,
+            },
+          ),
+        );
+        await controller.addLineLayer(
+          srcId,
+          layerId,
+          LineLayerProperties(
+            lineColor: color,
+            lineWidth: size,
+            lineOpacity: opacity,
+            lineDasharray: dashArray,
+          ),
+          minzoom: layerMinZoom,
+          maxzoom: layerMaxZoom,
+        );
+        sourceIds.add(srcId);
+        layerIds.add(layerId);
+      } catch (e) {
+        debugPrint('[map] geojson lines failed $projectLayerId: $e');
+      }
+    }
+
+    if (bucket.polys.isNotEmpty) {
+      final srcId = '$prefix${_polySrcId(projectLayerId)}';
+      final fillId = '$prefix${_polyFillId(projectLayerId)}';
+      final outlineId = '$prefix${_polyOutlineId(projectLayerId)}';
+      try {
+        await controller.addSource(
+          srcId,
+          GeojsonSourceProperties(
+            data: {
+              'type': 'FeatureCollection',
+              'features': bucket.polys,
+            },
+          ),
+        );
+        await controller.addFillLayer(
+          srcId,
+          fillId,
+          FillLayerProperties(
+            fillColor: color,
+            fillOpacity: opacity * 0.4,
+          ),
+          minzoom: layerMinZoom,
+          maxzoom: layerMaxZoom,
+        );
+        await controller.addLineLayer(
+          srcId,
+          outlineId,
+          LineLayerProperties(
+            lineColor: color,
+            lineWidth: 2.0,
+            lineOpacity: opacity,
+            lineDasharray: dashArray,
+          ),
+          minzoom: layerMinZoom,
+          maxzoom: layerMaxZoom,
+        );
+        sourceIds.add(srcId);
+        layerIds.addAll([fillId, outlineId]);
+      } catch (e) {
+        debugPrint('[map] geojson polys failed $projectLayerId: $e');
+      }
+    }
+
+    if (sourceIds.isNotEmpty) {
+      _mapSourceIdsByProjectLayer[projectLayerId] = [
+        ...?_mapSourceIdsByProjectLayer[projectLayerId],
+        ...sourceIds,
+      ];
+    }
+    if (layerIds.isNotEmpty) {
+      _mapLayerIdsByProjectLayer[projectLayerId] = [
+        ...?_mapLayerIdsByProjectLayer[projectLayerId],
+        ...layerIds,
+      ];
     }
   }
 
@@ -803,14 +1387,10 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
       return false;
     }
 
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => FormDetailScreen(
-          form: form,
-          initialGeometry: geometry,
-          initialLayerId: layerId,
-        ),
-      ),
+    await _presentForm(
+      form: form,
+      initialGeometry: geometry,
+      initialLayerId: layerId,
     );
 
     ref.read(mapCaptureProvider.notifier).cancel();
@@ -1122,6 +1702,30 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     }
   }
 
+  Future<void> _removeProjectLayerFromMap(
+    MapLibreMapController controller,
+    String projectLayerId,
+  ) async {
+    if (projectLayerId == _aoiKey) return;
+    final layerIds = _mapLayerIdsByProjectLayer.remove(projectLayerId);
+    final sourceIds = _mapSourceIdsByProjectLayer.remove(projectLayerId);
+    for (final id in layerIds ?? const <String>[]) {
+      try {
+        await controller.removeLayer(id);
+      } catch (e) {
+        debugPrint('[map] FAILED remove layer $id: $e');
+      }
+    }
+    for (final id in sourceIds ?? const <String>[]) {
+      try {
+        await controller.removeSource(id);
+      } catch (e) {
+        debugPrint('[map] FAILED remove source $id: $e');
+      }
+    }
+    _layerRenderMode.remove(projectLayerId);
+  }
+
   Future<void> _cleanupAll(MapLibreMapController controller) async {
     final layerCount =
         _mapLayerIdsByProjectLayer.values.expand((x) => x).length;
@@ -1212,6 +1816,85 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     await _openFormForCapture();
   }
 
+  bool _useMapSidePanel(BuildContext context) {
+    return LayoutOf(context).useTabletMapChrome;
+  }
+
+  Future<Map<String, dynamic>?> _presentForm({
+    required db.Form form,
+    String? existingClientId,
+    Map<String, dynamic>? initialGeometry,
+    String? initialLayerId,
+    Map<String, dynamic>? initialAttributes,
+    String? referenceSourceRef,
+    String? referenceDataSourceId,
+    Map<String, dynamic>? referenceOriginalAttributes,
+    Map<String, dynamic>? referenceOriginalGeometry,
+  }) async {
+    if (!mounted) return null;
+
+    if (_useMapSidePanel(context)) {
+      // Replace any in-progress panel form without awaiting its future.
+      final prev = _panelFormCompleter;
+      if (prev != null && !prev.isCompleted) {
+        prev.complete(null);
+      }
+      final completer = Completer<Map<String, dynamic>?>();
+      setState(() {
+        _panelFormArgs = _PanelFormArgs(
+          form: form,
+          existingClientId: existingClientId,
+          initialGeometry: initialGeometry,
+          initialLayerId: initialLayerId,
+          initialAttributes: initialAttributes,
+          referenceSourceRef: referenceSourceRef,
+          referenceDataSourceId: referenceDataSourceId,
+          referenceOriginalAttributes: referenceOriginalAttributes,
+          referenceOriginalGeometry: referenceOriginalGeometry,
+        );
+        _panelFormCompleter = completer;
+        _panelFeature = null;
+        _tabletMode = _TabletMode.form;
+        _tabletPanelExpanded = true;
+      });
+      return completer.future;
+    }
+
+    return Navigator.of(context).push<Map<String, dynamic>?>(
+      MaterialPageRoute(
+        builder: (_) => FormDetailScreen(
+          form: form,
+          existingClientId: existingClientId,
+          initialGeometry: initialGeometry,
+          initialLayerId: initialLayerId,
+          initialAttributes: initialAttributes,
+          referenceSourceRef: referenceSourceRef,
+          referenceDataSourceId: referenceDataSourceId,
+          referenceOriginalAttributes: referenceOriginalAttributes,
+          referenceOriginalGeometry: referenceOriginalGeometry,
+        ),
+      ),
+    );
+  }
+
+  void _finishPanelForm(Map<String, dynamic>? result) {
+    final completer = _panelFormCompleter;
+    _panelFormCompleter = null;
+    if (mounted) {
+      setState(() {
+        _panelFormArgs = null;
+        if (_tabletMode == _TabletMode.form) {
+          _tabletMode = _TabletMode.layers;
+        }
+      });
+    } else {
+      _panelFormArgs = null;
+    }
+    if (completer != null && !completer.isCompleted) {
+      completer.complete(result);
+    }
+  }
+
   Future<void> _openFormForCapture() async {
     final capture = ref.read(mapCaptureProvider);
     final candidate = capture.candidate;
@@ -1280,14 +1963,10 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
       return;
     }
 
-    await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => FormDetailScreen(
-          form: form,
-          initialGeometry: geometry,
-          initialLayerId: layerId,
-        ),
-      ),
+    await _presentForm(
+      form: form,
+      initialGeometry: geometry,
+      initialLayerId: layerId,
     );
 
     // After the form screen pops back, clean up regardless of save/cancel
@@ -1487,20 +2166,16 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     //    - initial* values are what the user sees & can keep tweaking.
     //    - referenceOriginal* values are the snapshots backend reconciliation
     //      diffs against. They never change once captured.
-    final result = await Navigator.of(context).push<Map<String, dynamic>?>(
-      MaterialPageRoute(
-        builder: (_) => FormDetailScreen(
-          form: form,
-          existingClientId: existingClientId,
-          initialGeometry: initialGeom,
-          initialLayerId: layerId,
-          initialAttributes: initialAttrs,
-          referenceSourceRef: ref0.sourceRef,
-          referenceDataSourceId: ref0.dataSourceId,
-          referenceOriginalAttributes: origAttrs,
-          referenceOriginalGeometry: origGeom,
-        ),
-      ),
+    final result = await _presentForm(
+      form: form,
+      existingClientId: existingClientId,
+      initialGeometry: initialGeom,
+      initialLayerId: layerId,
+      initialAttributes: initialAttrs,
+      referenceSourceRef: ref0.sourceRef,
+      referenceDataSourceId: ref0.dataSourceId,
+      referenceOriginalAttributes: origAttrs,
+      referenceOriginalGeometry: origGeom,
     );
 
     // 7. Handle the form result. If user tapped the Edit-location banner,
@@ -1715,8 +2390,18 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
   }
 
   Future<void> _onSearchResultTap(SearchResult result) async {
-    // Fly the camera to the feature; do NOT open the attribute drawer.
-    // User can tap the feature on the map itself to open the drawer.
+    // Fly + highlight only. Directions are opt-in via the result row action.
+    await _focusSearchResult(result, withDirections: false);
+  }
+
+  Future<void> _onSearchResultDirections(SearchResult result) async {
+    await _focusSearchResult(result, withDirections: true);
+  }
+
+  Future<void> _focusSearchResult(
+    SearchResult result, {
+    required bool withDirections,
+  }) async {
     final controller = _controller;
     if (controller == null) return;
 
@@ -1732,13 +2417,212 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
           await controller.animateCamera(
             CameraUpdate.newLatLngZoom(latLng, 17),
           );
-          // Drop a bright marker on the selected feature
-          await _setSelectedResultMarker(latLng);
+          await _setFeatureSelectionHighlight(
+            Map<String, dynamic>.from(parsed),
+          );
+          if (withDirections) {
+            await _updateGuideToTarget(latLng);
+          } else {
+            await _clearSelectedResultMarker();
+          }
         }
       }
     } catch (e) {
       debugPrint('[search] fly-to failed: $e');
     }
+  }
+
+  Future<void> _onGoToLocation(double lat, double lng) async {
+    final controller = _controller;
+    if (controller == null) return;
+
+    final latLng = LatLng(lat, lng);
+    try {
+      await controller.animateCamera(
+        CameraUpdate.newLatLngZoom(latLng, 17),
+      );
+      await _setSelectedResultMarker(latLng);
+      // Coordinate "Go" is an explicit navigate action — show guide.
+      await _updateGuideToTarget(latLng);
+      if (mounted) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            duration: const Duration(seconds: 2),
+            content: Text(
+              'At ${lat.toStringAsFixed(6)}, ${lng.toStringAsFixed(6)}',
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[search] go-to location failed: $e');
+    }
+  }
+
+  Future<void> _clearFeatureSelectionHighlight() async {
+    final controller = _controller;
+    if (controller == null || !_selectionOverlayActive) return;
+    _stopSelectionPulse();
+    for (final id in _selectionOverlayLayerIds) {
+      try {
+        await controller.removeLayer(id);
+      } catch (_) {}
+    }
+    _selectionOverlayLayerIds.clear();
+    try {
+      await controller.removeSource(_selSrcId);
+    } catch (_) {}
+    _selectionOverlayActive = false;
+  }
+
+  Future<void> _setFeatureSelectionHighlight(
+    Map<String, dynamic>? geometry,
+  ) async {
+    await _clearFeatureSelectionHighlight();
+    if (geometry == null) return;
+    final controller = _controller;
+    if (controller == null || !_styleLoaded) return;
+
+    var normalized = _asMap(geometry);
+    if (normalized == null) return;
+    normalized = _maybePromoteClosedLineToPolygon(normalized);
+    final type = normalized['type']?.toString() ?? '';
+
+    try {
+      await controller.addSource(
+        _selSrcId,
+        GeojsonSourceProperties(
+          data: {
+            'type': 'FeatureCollection',
+            'features': [
+              {
+                'type': 'Feature',
+                'geometry': normalized,
+                'properties': <String, dynamic>{},
+              },
+            ],
+          },
+        ),
+      );
+
+      if (type == 'Point' || type == 'MultiPoint') {
+        await controller.addCircleLayer(
+          _selSrcId,
+          _selPointHaloId,
+          CircleLayerProperties(
+            circleRadius: 18,
+            circleColor: _selHaloColor,
+            circleOpacity: 0.4,
+            circleStrokeWidth: 0,
+          ),
+        );
+        await controller.addCircleLayer(
+          _selSrcId,
+          _selPointCoreId,
+          CircleLayerProperties(
+            circleRadius: 8,
+            circleColor: _selCoreColor,
+            circleOpacity: 0.95,
+            circleStrokeColor: '#FFFFFF',
+            circleStrokeWidth: 2.5,
+          ),
+        );
+        _selectionOverlayLayerIds.addAll([_selPointHaloId, _selPointCoreId]);
+        _startSelectionPulse();
+      } else if (type == 'LineString' || type == 'MultiLineString') {
+        await controller.addLineLayer(
+          _selSrcId,
+          _selHaloLineId,
+          LineLayerProperties(
+            lineColor: _selHaloColor,
+            lineWidth: 12,
+            lineOpacity: 0.5,
+            lineCap: 'round',
+            lineJoin: 'round',
+          ),
+        );
+        await controller.addLineLayer(
+          _selSrcId,
+          _selCoreLineId,
+          LineLayerProperties(
+            lineColor: _selCoreColor,
+            lineWidth: 4.5,
+            lineOpacity: 1,
+            lineCap: 'round',
+            lineJoin: 'round',
+          ),
+        );
+        _selectionOverlayLayerIds.addAll([_selHaloLineId, _selCoreLineId]);
+      } else if (type == 'Polygon' || type == 'MultiPolygon') {
+        await controller.addFillLayer(
+          _selSrcId,
+          _selHaloFillId,
+          FillLayerProperties(
+            fillColor: _selHaloColor,
+            fillOpacity: 0.28,
+          ),
+        );
+        await controller.addLineLayer(
+          _selSrcId,
+          _selCoreLineId,
+          LineLayerProperties(
+            lineColor: _selCoreColor,
+            lineWidth: 3.5,
+            lineOpacity: 1,
+          ),
+        );
+        _selectionOverlayLayerIds.addAll([_selHaloFillId, _selCoreLineId]);
+      }
+      _selectionOverlayActive = true;
+    } catch (e) {
+      debugPrint('[map] selection highlight failed: $e');
+    }
+  }
+
+  /// Animates the purple "found" halo with a growing, fading pulse so the
+  /// selected point marker draws the eye. Only used for Point/MultiPoint
+  /// selections — line/polygon halos stay static since a moving radius
+  /// doesn't read the same on those shapes.
+  void _startSelectionPulse() {
+    _selectionPulseTimer?.cancel();
+    _pulsePhase = 0.0;
+    _selectionPulseTimer =
+        Timer.periodic(const Duration(milliseconds: 60), (timer) {
+      final controller = _controller;
+      if (!mounted ||
+          controller == null ||
+          !_selectionOverlayActive ||
+          !_selectionOverlayLayerIds.contains(_selPointHaloId)) {
+        timer.cancel();
+        return;
+      }
+
+      _pulsePhase += 0.12;
+      // 0..1 smooth oscillation
+      final t = (sin(_pulsePhase) + 1) / 2;
+
+      final radius = _selPointHaloMinRadius +
+          t * (_selPointHaloMaxRadius - _selPointHaloMinRadius);
+      final opacity = 0.55 - t * 0.35; // grows while fading — classic "ping"
+
+      controller
+          .setLayerProperties(
+            _selPointHaloId,
+            CircleLayerProperties(
+              circleRadius: radius,
+              circleColor: _selHaloColor,
+              circleOpacity: opacity,
+              circleStrokeWidth: 0,
+            ),
+          )
+          .catchError((_) {});
+    });
+  }
+
+  void _stopSelectionPulse() {
+    _selectionPulseTimer?.cancel();
+    _selectionPulseTimer = null;
   }
 
   /// Draws a temporary marker at the given position to indicate the selected
@@ -1762,7 +2646,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
         CircleOptions(
           geometry: position,
           circleRadius: 12,
-          circleColor: '#ff6b00',
+          circleColor: _selCoreColor,
           circleOpacity: 0.9,
           circleStrokeColor: '#ffffff',
           circleStrokeWidth: 3,
@@ -1774,15 +2658,211 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     }
   }
 
+  Future<void> _updateGuideToTarget(LatLng target) async {
+    final controller = _controller;
+    if (controller == null) return;
+
+    final requestId = ++_guideRequestId;
+    await _removeGuideLine();
+
+    final showMyLoc = ref.read(settingsProvider).value?.showMyLocation ?? false;
+    final current = _myLocationLayer?.currentPosition;
+    if (current == null) {
+      if (!mounted) return;
+      setState(() {
+        _guideInfo = _GuideInfo(
+          title: 'Guide',
+          distanceMeters: null,
+          bearingDegrees: null,
+          hint: showMyLoc
+              ? 'Waiting for GPS fix to show distance and heading.'
+              : 'Turn on My Location to show distance and heading.',
+        );
+      });
+      return;
+    }
+
+    final routeService = ref.read(guideRouteServiceProvider);
+    final straight = routeService.straightLine(
+      fromLat: current.latitude,
+      fromLng: current.longitude,
+      toLat: target.latitude,
+      toLng: target.longitude,
+    );
+
+    await _applyGuideRoute(straight, requestId);
+    if (!mounted || requestId != _guideRequestId) return;
+
+    setState(() {
+      _guideInfo = _GuideInfo(
+        title: 'Guide',
+        distanceMeters: straight.distanceMeters,
+        bearingDegrees: straight.bearingDegrees,
+        hint: 'Straight line shown — loading road route…',
+        steps: straight.steps,
+      );
+    });
+
+    final road = await routeService.route(
+      fromLat: current.latitude,
+      fromLng: current.longitude,
+      toLat: target.latitude,
+      toLng: target.longitude,
+    );
+
+    if (!mounted || requestId != _guideRequestId) return;
+    if (!road.followsRoads) return;
+
+    await _applyGuideRoute(road, requestId);
+    if (!mounted || requestId != _guideRequestId) return;
+    setState(() {
+      _guideInfo = _GuideInfo(
+        title: 'Road guide',
+        distanceMeters: road.distanceMeters,
+        bearingDegrees: road.bearingDegrees,
+        hint: road.hint,
+        steps: road.steps,
+      );
+    });
+  }
+
+  Map<String, dynamic> _guideRouteGeoJson(List<LatLng> geometry) {
+    return {
+      'type': 'FeatureCollection',
+      'features': [
+        {
+          'type': 'Feature',
+          'properties': const {'kind': 'guide-route'},
+          'geometry': {
+            'type': 'LineString',
+            'coordinates': geometry
+                .map((p) => [p.longitude, p.latitude])
+                .toList(growable: false),
+          },
+        },
+      ],
+    };
+  }
+
+  LineLayerProperties _guideHaloLayerProps() {
+    return LineLayerProperties(
+      lineColor: _guideHaloColor,
+      lineWidth: _guideLineWidth + 5.0,
+      lineOpacity: 0.7,
+      lineCap: 'round',
+      lineJoin: 'round',
+      lineBlur: 0.5,
+    );
+  }
+
+  LineLayerProperties _guideLineLayerProps({List<double>? dash}) {
+    return LineLayerProperties(
+      lineColor: _guideLineColor,
+      lineWidth: _guideLineWidth,
+      lineOpacity: 0.95,
+      lineCap: 'round',
+      lineJoin: 'round',
+      lineDasharray: dash ?? _guideDashSequence.first,
+    );
+  }
+
+  void _startGuideDashAnimation() {
+    _guideDashTimer?.cancel();
+    _guideDashFrame = 0;
+    _guideDashTimer = Timer.periodic(const Duration(milliseconds: 80), (timer) {
+      if (!mounted || !_guideRouteLayerActive) {
+        timer.cancel();
+        return;
+      }
+      final controller = _controller;
+      if (controller == null) return;
+      _guideDashFrame++;
+      final dash = _guideDashSequence[
+          _guideDashFrame % _guideDashSequence.length];
+      controller
+          .setLayerProperties(
+            _guideLayerId,
+            _guideLineLayerProps(dash: dash),
+          )
+          .catchError((_) {});
+    });
+  }
+
+  Future<void> _applyGuideRoute(GuideRouteResult route, int requestId) async {
+    if (requestId != _guideRequestId) return;
+    final controller = _controller;
+    if (controller == null) return;
+
+    if (route.geometry.length < 2) return;
+
+    _guideLineWidth = route.followsRoads ? 5.5 : 5.0;
+    final geojson = _guideRouteGeoJson(route.geometry);
+    final haloProps = _guideHaloLayerProps();
+    final layerProps = _guideLineLayerProps();
+
+    try {
+      if (_guideRouteLayerActive) {
+        await controller.setGeoJsonSource(_guideSrcId, geojson);
+        await controller.setLayerProperties(_guideHaloLayerId, haloProps);
+        await controller.setLayerProperties(_guideLayerId, layerProps);
+      } else {
+        await controller.addSource(
+          _guideSrcId,
+          GeojsonSourceProperties(data: geojson),
+        );
+        // Halo underneath, dashed green on top.
+        await controller.addLineLayer(
+          _guideSrcId,
+          _guideHaloLayerId,
+          haloProps,
+        );
+        await controller.addLineLayer(
+          _guideSrcId,
+          _guideLayerId,
+          layerProps,
+        );
+        _guideRouteLayerActive = true;
+        _startGuideDashAnimation();
+      }
+    } catch (e) {
+      debugPrint('[search] failed to draw guide line: $e');
+    }
+  }
+
+  Future<void> _removeGuideLine() async {
+    _guideDashTimer?.cancel();
+    _guideDashTimer = null;
+    final controller = _controller;
+    if (controller == null || !_guideRouteLayerActive) {
+      _guideRouteLayerActive = false;
+      return;
+    }
+    _guideRouteLayerActive = false;
+    try {
+      await controller.removeLayer(_guideLayerId);
+      await controller.removeLayer(_guideHaloLayerId);
+      await controller.removeSource(_guideSrcId);
+    } catch (_) {}
+  }
+
+  Future<void> _clearGuide() async {
+    _guideRequestId++;
+    await _removeGuideLine();
+    if (!mounted) return;
+    setState(() => _guideInfo = null);
+  }
+
   /// Clear the search-result marker.
   Future<void> _clearSelectedResultMarker() async {
     final controller = _controller;
     final prior = _selectedResultMarker;
-    if (controller == null || prior == null) return;
-    try {
-      await controller.removeCircle(prior);
-    } catch (_) {}
+    if (controller != null && prior != null) {
+      try {
+        await controller.removeCircle(prior);
+      } catch (_) {}
+    }
     _selectedResultMarker = null;
+    await _clearGuide();
   }
 
   // ─────────────────────────────────────────────
@@ -1875,13 +2955,12 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     final minLng = tapLatLng.longitude - pad;
     final maxLng = tapLatLng.longitude + pad;
 
-    final refFeatures =
-        ref.read(localReferenceFeaturesProvider(widget.project.id)).value ??
-            const <LocalMapFeature>[];
-    final colFeatures =
+    // Avoid loading every reference feature into RAM for snap — that OOM-kills
+    // large projects. Snap against collected features only; reference verts
+    // remain available via map tiles for visual snapping context.
+    final allFeatures =
         ref.read(localCollectedFeaturesProvider(widget.project.id)).value ??
             const <LocalMapFeature>[];
-    final allFeatures = [...refFeatures, ...colFeatures];
 
     LatLng? bestLatLng;
     double bestDistSq = double.infinity;
@@ -2029,7 +3108,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
 
     // Delegate to the shared hit-test + bottom-sheet logic so a plain map
     // tap on a rendered feature actually shows its attributes.
-    await _queryAndShow(point, null);
+    await _queryAndShow(point, null, coords);
   }
 
   Future<void> _onMapLongClick(Point<double> point, LatLng coords) async {
@@ -2073,7 +3152,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
         break;
       }
     }
-    _queryAndShow(point, matchedLayerId);
+    _queryAndShow(point, matchedLayerId, coordinates);
   }
 
   void _enterEditMode({
@@ -2940,7 +4019,11 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     }
   }
 
-  Future<void> _queryAndShow(Point<double> point, String? hintLayerId) async {
+  Future<void> _queryAndShow(
+    Point<double> point,
+    String? hintLayerId, [
+    LatLng? tapCoords,
+  ]) async {
     final controller = _controller;
     if (controller == null) return;
 
@@ -2949,25 +4032,57 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     if (layerIds.isEmpty) return;
 
     try {
-      List<dynamic> hits = const [];
-      try {
-        hits = await controller.queryRenderedFeaturesInRect(
-          Rect.fromLTRB(
-            point.x - 14,
-            point.y - 14,
-            point.x + 14,
-            point.y + 14,
-          ),
-          layerIds,
-          null,
-        );
-      } catch (_) {
-        hits = await controller.queryRenderedFeatures(point, layerIds, null);
+      // Query per project layer so we know which layer a hit belongs to.
+      // Prefer non-cluster features with fc_ref over tippecanoe cluster proxies.
+      Map<String, dynamic>? feature;
+      Map<String, dynamic> props = const {};
+      String? layerId = hintLayerId;
+      var totalHits = 0;
+
+      final layersToQuery = hintLayerId != null
+          ? <MapEntry<String, List<String>>>[
+              MapEntry(
+                hintLayerId,
+                _mapLayerIdsByProjectLayer[hintLayerId] ?? const [],
+              ),
+            ]
+          : _mapLayerIdsByProjectLayer.entries.toList();
+
+      for (final entry in layersToQuery) {
+        final styleIds = entry.value;
+        if (styleIds.isEmpty) continue;
+        List<dynamic> layerHits = const [];
+        try {
+          layerHits = await controller.queryRenderedFeaturesInRect(
+            Rect.fromLTRB(
+              point.x - 14,
+              point.y - 14,
+              point.x + 14,
+              point.y + 14,
+            ),
+            styleIds,
+            null,
+          );
+        } catch (_) {
+          try {
+            layerHits =
+                await controller.queryRenderedFeatures(point, styleIds, null);
+          } catch (_) {}
+        }
+        totalHits += layerHits.length;
+        final picked = _pickBestTapFeature(layerHits);
+        if (picked != null) {
+          feature = picked.$1;
+          props = picked.$2;
+          layerId = entry.key;
+          break;
+        }
       }
 
-      debugPrint('[map] featureTap hits=${hits.length}');
+      debugPrint('[map] featureTap hits=$totalHits layer=$layerId '
+          'props=${props.keys.toList()}');
 
-      if (hits.isEmpty) {
+      if (feature == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).clearSnackBars();
           ScaffoldMessenger.of(context).showSnackBar(
@@ -2980,89 +4095,35 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
         return;
       }
 
-      final first = hits.first;
-      Map<String, dynamic>? feature;
-      if (first is Map) {
-        feature = Map<String, dynamic>.from(first);
-      } else if (first is String) {
-        try {
-          final parsed = jsonDecode(first);
-          if (parsed is Map) {
-            feature = Map<String, dynamic>.from(parsed);
-          }
-        } catch (_) {}
-      }
-
-      Map<String, dynamic> props = const {};
-      if (feature != null) {
-        final p = feature['properties'];
-        if (p is Map) {
-          props = Map<String, dynamic>.from(p);
-        } else if (p is String) {
-          try {
-            final parsed = jsonDecode(p);
-            if (parsed is Map) {
-              props = Map<String, dynamic>.from(parsed);
-            }
-          } catch (_) {}
-        }
-      }
-
-      // ── Vector tile features carry only {id, source_ref} — enrich from SQLite ──
-      // GeoJSON features carry full {_layerId, _featureId, _attributes, _sourceRef, _source}.
-      // Detect the vector tile shape by absence of _featureId + presence of raw id.
+      // ── Vector tile hits carry fc_ref / _source_ref; full attributes live in
+      // SQLite (reference_search index). GeoJSON-collected hits use nested
+      // _attributes / _featureId keys.
       String? featureId = props['_featureId']?.toString();
-      String? layerId = props['_layerId']?.toString() ?? hintLayerId;
       Map<String, dynamic> attributes = const {};
       String? source = props['_source']?.toString();
-      String? sourceRef = props['_sourceRef']?.toString();
+      String? sourceRef = _nonEmptyString(props['fc_ref']) ??
+          _nonEmptyString(props['_source_ref']) ??
+          _nonEmptyString(props['_sourceRef']) ??
+          _nonEmptyString(props['source_ref']) ??
+          _nonEmptyString(feature['id']);
 
-      // Detect vector tile hit: props are flat (attributes at top level).
-      // Tiles from tippecanoe include _source_ref and all attribute fields
-      // directly on properties, no nested _attributes key.
-      final isVectorTileHit = featureId == null &&
-          (props['_source_ref'] != null || props['_data_source_id'] != null);
+      layerId ??= props['_layerId']?.toString();
+      layerId ??= _projectLayerIdFromMapHit(feature);
+
+      final isVectorTileHit =
+          props['_featureId'] == null && props['_attributes'] == null;
+
+      if (kDebugMode) {
+        debugPrint(
+          '[map] tap props keys=${props.keys.toList()} '
+          'fc_ref=${props['fc_ref']} source=${feature?['source']} '
+          'layerId=$layerId',
+        );
+      }
 
       if (isVectorTileHit) {
-        // Attributes are all flat top-level props EXCEPT the underscore-prefixed
-        // metadata (_source_ref, _data_source_id). Copy everything else.
-        final flatAttrs = <String, dynamic>{};
-        for (final entry in props.entries) {
-          if (!entry.key.startsWith('_')) {
-            flatAttrs[entry.key] = entry.value;
-          }
-        }
-        attributes = flatAttrs;
-
-        // Resolve featureId + layerId from SQLite via source_ref
-        // (we need the real internal id for edit/delete to work).
-        source = 'reference';
-        sourceRef = props['_source_ref']?.toString();
-
-        try {
-          final db = ref.read(appDatabaseProvider);
-          if (db != null && sourceRef != null) {
-            var q = db.select(db.referenceFeatures)
-              ..where((r) => r.sourceRef.equals(sourceRef!));
-            if (layerId != null) {
-              q = q..where((r) => r.layerId.equals(layerId!));
-            }
-            final row = await q.getSingleOrNull();
-            if (row != null) {
-              featureId = row.id;
-              layerId = row.layerId;
-              debugPrint('[map] vector tile tap resolved: '
-                  'id=$featureId, layer=$layerId, attrs=${attributes.length}');
-            } else {
-              debugPrint('[map] vector tile: no SQLite row for '
-                  'source_ref=$sourceRef layer=$layerId');
-            }
-          }
-        } catch (e) {
-          debugPrint('[map] vector tile SQLite lookup failed: $e');
-        }
+        source ??= 'reference';
       } else {
-        // Original GeoJSON path
         final rawAttrs = props['_attributes'];
         if (rawAttrs is String) {
           try {
@@ -3074,19 +4135,107 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
         } else if (rawAttrs is Map) {
           attributes = Map<String, dynamic>.from(rawAttrs);
         }
+        sourceRef ??= _nonEmptyString(props['_sourceRef']);
+      }
+
+      Map<String, dynamic>? highlightGeom;
+      try {
+        final database = ref.read(appDatabaseProvider);
+        if (database != null) {
+          db.ReferenceFeature? row;
+          if (featureId != null && featureId.isNotEmpty) {
+            row = await (database.select(database.referenceFeatures)
+                  ..where((r) => r.id.equals(featureId!))
+                  ..where((r) => r.projectId.equals(widget.project.id)))
+                .getSingleOrNull();
+          }
+          if (row == null &&
+              sourceRef != null &&
+              sourceRef.isNotEmpty) {
+            var q = database.select(database.referenceFeatures)
+              ..where((r) => r.projectId.equals(widget.project.id))
+              ..where((r) => r.sourceRef.equals(sourceRef!));
+            if (layerId != null) {
+              q = q..where((r) => r.layerId.equals(layerId!));
+            }
+            final matches = await q.get();
+            row = matches.isEmpty ? null : matches.first;
+            if (row == null && layerId != null) {
+              row = await (database.select(database.referenceFeatures)
+                    ..where(
+                      (r) => r.id.equals('$layerId:$sourceRef'),
+                    ))
+                  .getSingleOrNull();
+            }
+            // source_ref may be stored under a different casing / id shape
+          }
+
+          // Old mbtiles without fc_ref: nearest Point in SQLite for this layer.
+          if (row == null &&
+              layerId != null &&
+              tapCoords != null) {
+            row = await _nearestReferenceFeature(
+              database: database,
+              layerId: layerId!,
+              lng: tapCoords.longitude,
+              lat: tapCoords.latitude,
+            );
+            if (row != null) {
+              debugPrint(
+                '[map] tap resolved by proximity: id=${row.id} '
+                'source_ref=${row.sourceRef}',
+              );
+            }
+          }
+
+          if (row != null) {
+            featureId = row.id;
+            layerId = row.layerId;
+            source ??= 'reference';
+            sourceRef ??= row.sourceRef;
+            try {
+              final parsedAttrs = jsonDecode(row.attributes);
+              if (parsedAttrs is Map) {
+                attributes = Map<String, dynamic>.from(parsedAttrs);
+              }
+            } catch (_) {}
+            try {
+              final parsedGeom = jsonDecode(row.geometry);
+              if (parsedGeom is Map) {
+                highlightGeom = Map<String, dynamic>.from(parsedGeom);
+              }
+            } catch (_) {}
+            debugPrint('[map] tap resolved from SQLite: id=$featureId '
+                'layer=$layerId attrs=${attributes.length}');
+          } else {
+            debugPrint('[map] tap: no SQLite row for source_ref=$sourceRef '
+                'layer=$layerId props=${props.keys.toList()}');
+          }
+        }
+      } catch (e) {
+        debugPrint('[map] SQLite tap enrichment failed: $e');
+      }
+
+      if (highlightGeom == null && feature != null) {
+        final g = feature['geometry'];
+        if (g is Map) {
+          highlightGeom = Map<String, dynamic>.from(g);
+        }
       }
 
       if (sourceRef != null && sourceRef.isEmpty) sourceRef = null;
-      debugPrint('[D0.2 DEBUG] tap props: source=$source, allProps=$props');
+      debugPrint('[D0.2 DEBUG] tap props: source=$source, attrs=${attributes.length}');
 
       if (!mounted) return;
+      if (highlightGeom != null) {
+        await _setFeatureSelectionHighlight(highlightGeom);
+      }
       await _showFeatureSheet(
         layerId: layerId,
         featureId: featureId,
-
         attributes: attributes,
-        source: source, // 👈 NEW
-        sourceRef: sourceRef, // 👈 NEW
+        source: source,
+        sourceRef: sourceRef,
       );
     } catch (e) {
       debugPrint('[map] featureTap error: $e');
@@ -3126,9 +4275,6 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     String? source, // 👈 NEW
     String? sourceRef, // 👈 NEW
   }) async {
-    final theme = Theme.of(context);
-    final settingsAsync = ref.watch(settingsProvider);
-    final basemapId = settingsAsync.value?.basemap ?? BasemapId.osm;
     final layerNamesAsync =
         ref.read(localLayerNamesProvider(widget.project.id));
     final layerNames = layerNamesAsync.value ?? const <String, String>{};
@@ -3204,6 +4350,25 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
       }
     }
 
+    if (_useMapSidePanel(context)) {
+      setState(() {
+        _panelFeature = _PanelFeature(
+          layerId: layerId,
+          featureId: featureId,
+          attributes: attributes,
+          source: source,
+          sourceRef: sourceRef,
+          layerName: layerName,
+          subtitle: subtitle,
+          keys: keys,
+          layerEditable: layerEditable,
+        );
+        _tabletMode = _TabletMode.feature;
+        _tabletPanelExpanded = true;
+      });
+      return;
+    }
+
     showModalBottomSheet(
       context: context,
       showDragHandle: true,
@@ -3217,166 +4382,221 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
           builder: (context, scroll) {
             return Padding(
               padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.location_on, color: theme.colorScheme.primary),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              layerName,
-                              style: theme.textTheme.titleMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            if (subtitle != null)
-                              Text(
-                                subtitle,
-                                style: theme.textTheme.bodySmall?.copyWith(
-                                  color: theme.colorScheme.onSurfaceVariant,
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (featureId != null) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      'id: $featureId',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                        fontFamily: 'monospace',
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: keys.isEmpty
-                        ? Center(
-                            child: Text(
-                              'No attributes available for this feature.',
-                              style: theme.textTheme.bodyMedium?.copyWith(
-                                color: theme.colorScheme.onSurfaceVariant,
-                              ),
-                            ),
-                          )
-                        : ListView.separated(
-                            controller: scroll,
-                            itemCount: keys.length,
-                            separatorBuilder: (_, __) =>
-                                const Divider(height: 1),
-                            itemBuilder: (_, i) {
-                              final k = keys[i];
-                              return Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  vertical: 10,
-                                  horizontal: 4,
-                                ),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(
-                                      k,
-                                      style:
-                                          theme.textTheme.labelMedium?.copyWith(
-                                        color:
-                                            theme.colorScheme.onSurfaceVariant,
-                                      ),
-                                    ),
-                                    const SizedBox(height: 2),
-                                    SelectableText(
-                                      formatVal(attributes[k]),
-                                      style: theme.textTheme.bodyMedium,
-                                    ),
-                                  ],
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                  // ── D0.2/D0.3: Reference feature actions ──
-                  // Hidden for AOI / non-editable layers.
-
-                  if (layerEditable &&
-                      (source == 'reference' ||
-                          (source == 'collected' && sourceRef != null))) ...[
-                    const SizedBox(height: 8),
-                    const Divider(height: 1),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                              _onEditReferencePressed(
-                                layerId: layerId,
-                                featureId: featureId,
-                                sourceRef: sourceRef,
-                                attributes: attributes,
-                              );
-                            },
-                            icon: const Icon(Icons.edit_outlined),
-                            label: const Text('Edit'),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                              _onMarkDeletedPressed(
-                                layerId: layerId,
-                                featureId: featureId,
-                                sourceRef: sourceRef,
-                                attributes: attributes,
-                              );
-                            },
-                            icon: Icon(
-                              Icons.delete_outline,
-                              color: theme.colorScheme.error,
-                            ),
-                            label: Text(
-                              'Mark deleted',
-                              style: TextStyle(
-                                color: theme.colorScheme.error,
-                              ),
-                            ),
-                            style: OutlinedButton.styleFrom(
-                              side: BorderSide(
-                                color: theme.colorScheme.error.withOpacity(0.4),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ] else if (!layerEditable &&
-                      (source == 'reference' ||
-                          (source == 'collected' && sourceRef != null))) ...[
-                    const SizedBox(height: 8),
-                    const Divider(height: 1),
-                    const SizedBox(height: 8),
-                    Text(
-                      'This layer is the project AOI and cannot be edited in the field.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ],
-                ],
+              child: _buildFeatureInspector(
+                scrollController: scroll,
+                layerId: layerId,
+                featureId: featureId,
+                attributes: attributes,
+                source: source,
+                sourceRef: sourceRef,
+                layerName: layerName,
+                subtitle: subtitle,
+                keys: keys,
+                layerEditable: layerEditable,
+                formatVal: formatVal,
+                dismissSheet: true,
               ),
             );
           },
         );
       },
+    );
+  }
+
+  Widget _buildFeatureInspector({
+    ScrollController? scrollController,
+    required String? layerId,
+    required String? featureId,
+    required Map<String, dynamic> attributes,
+    required String? source,
+    required String? sourceRef,
+    required String layerName,
+    required String? subtitle,
+    required List<String> keys,
+    required bool layerEditable,
+    required String Function(dynamic) formatVal,
+    required bool dismissSheet,
+  }) {
+    final theme = Theme.of(context);
+
+    void closeThen(VoidCallback action) {
+      if (dismissSheet) {
+        Navigator.of(context).pop();
+      } else {
+        setState(() {
+          _panelFeature = null;
+          if (_tabletMode == _TabletMode.feature) {
+            _tabletMode = _TabletMode.layers;
+          }
+        });
+      }
+      action();
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.location_on, color: theme.colorScheme.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    layerName,
+                    style: theme.textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  if (subtitle != null)
+                    Text(
+                      subtitle,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (!dismissSheet)
+              IconButton(
+                tooltip: 'Close',
+                icon: const Icon(Icons.close),
+                onPressed: () {
+                  setState(() {
+                    _panelFeature = null;
+                    if (_tabletMode == _TabletMode.feature) {
+                      _tabletMode = _TabletMode.layers;
+                    }
+                  });
+                },
+              ),
+          ],
+        ),
+        if (featureId != null) ...[
+          const SizedBox(height: 2),
+          Text(
+            'id: $featureId',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontFamily: 'monospace',
+            ),
+          ),
+        ],
+        const SizedBox(height: 12),
+        Expanded(
+          child: keys.isEmpty
+              ? Center(
+                  child: Text(
+                    'No attributes available for this feature.',
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                )
+              : ListView.separated(
+                  controller: scrollController,
+                  itemCount: keys.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final k = keys[i];
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(
+                        vertical: 10,
+                        horizontal: 4,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            k,
+                            style: theme.textTheme.labelMedium?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          SelectableText(
+                            formatVal(attributes[k]),
+                            style: theme.textTheme.bodyMedium,
+                          ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ),
+        if (layerEditable &&
+            (source == 'reference' ||
+                (source == 'collected' && sourceRef != null))) ...[
+          const SizedBox(height: 8),
+          const Divider(height: 1),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    closeThen(() {
+                      _onEditReferencePressed(
+                        layerId: layerId,
+                        featureId: featureId,
+                        sourceRef: sourceRef,
+                        attributes: attributes,
+                      );
+                    });
+                  },
+                  icon: const Icon(Icons.edit_outlined),
+                  label: const Text('Edit'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    closeThen(() {
+                      _onMarkDeletedPressed(
+                        layerId: layerId,
+                        featureId: featureId,
+                        sourceRef: sourceRef,
+                        attributes: attributes,
+                      );
+                    });
+                  },
+                  icon: Icon(
+                    Icons.delete_outline,
+                    color: theme.colorScheme.error,
+                  ),
+                  label: Text(
+                    'Mark deleted',
+                    style: TextStyle(
+                      color: theme.colorScheme.error,
+                    ),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    side: BorderSide(
+                      color: theme.colorScheme.error.withOpacity(0.4),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ] else if (!layerEditable &&
+            (source == 'reference' ||
+                (source == 'collected' && sourceRef != null))) ...[
+          const SizedBox(height: 8),
+          const Divider(height: 1),
+          const SizedBox(height: 8),
+          Text(
+            'This layer is the project AOI and cannot be edited in the field.',
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ],
     );
   }
 
@@ -3593,7 +4813,42 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     setState(() {
       _visible[layerId] = value;
     });
-    await _renderFeatures(fitCamera: false);
+    if (value) {
+      final tiles = await _tilesPathFor(layerId);
+      if (tiles == null) {
+        final repo = ref.read(bundleRepositoryProvider);
+        if (repo != null) {
+          _layerFetchAttempted.remove(layerId);
+          if (mounted) {
+            setState(() => _layerFetchStatus = 'Downloading layer…');
+          }
+          try {
+            PacksManifest? manifest;
+            try {
+              manifest =
+                  await repo.getPacksManifest(projectId: widget.project.id);
+            } catch (_) {}
+            await ref.read(bundleDownloaderProvider).ensureLayerReferencePack(
+                  projectId: widget.project.id,
+                  layerId: layerId,
+                  repo: repo,
+                  remoteHash: manifest?.layerHashes[layerId],
+                );
+            _layerFetchAttempted.add(layerId);
+            ref.invalidate(
+              layerTilesPathProvider(
+                (projectId: widget.project.id, layerId: layerId),
+              ),
+            );
+          } catch (e) {
+            debugPrint('[map] toggle layer pack failed: $e');
+          } finally {
+            if (mounted) setState(() => _layerFetchStatus = null);
+          }
+        }
+      }
+    }
+    await _renderFeatures(onlyLayerId: layerId, fitCamera: false);
   }
 
   // ─────────────────────────────────────────────
@@ -3605,17 +4860,17 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
   /// that delegates to the existing layer-style fetcher you may already have.
   ///
   /// Returns map of projectLayerId → flat style {color,opacity,size,...}.
-  Future<Map<String, Map<String, dynamic>>> _loadLayerStyles(
+  Future<Map<String, LayerMapAppearance>> _loadLayerAppearances(
     String projectId,
   ) async {
     try {
       final raw = await ref.read(
         localLayerStylesProvider(projectId).future,
       );
-      final out = <String, Map<String, dynamic>>{};
+      final out = <String, LayerMapAppearance>{};
       for (final entry in raw.entries) {
-        final value = entry.value;
         Map<String, dynamic>? styleJson;
+        final value = entry.value;
         if (value is Map<String, dynamic>) {
           styleJson = value;
         } else if (value is Map) {
@@ -3631,11 +4886,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
           } catch (_) {}
         }
         if (styleJson == null) continue;
-
-        final def = styleJson['default'];
-        if (def is Map) {
-          out[entry.key] = Map<String, dynamic>.from(def); // wholesale ✅
-        }
+        out[entry.key] = parseLayerMapAppearance(styleJson);
       }
       return out;
     } catch (_) {
@@ -3646,6 +4897,185 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
   String _safeColor(dynamic v, String fallback) {
     if (v is String && v.isNotEmpty) return v;
     return fallback;
+  }
+
+  String? _nonEmptyString(dynamic v) {
+    if (v == null) return null;
+    final s = v.toString().trim();
+    return s.isEmpty ? null : s;
+  }
+
+  /// Prefer identifiable features over tippecanoe cluster proxies.
+  (Map<String, dynamic>, Map<String, dynamic>)? _pickBestTapFeature(
+    List<dynamic> hits,
+  ) {
+    (Map<String, dynamic>, Map<String, dynamic>)? fallback;
+    for (final hit in hits) {
+      Map<String, dynamic>? feature;
+      if (hit is Map) {
+        feature = Map<String, dynamic>.from(hit);
+      } else if (hit is String) {
+        try {
+          final parsed = jsonDecode(hit);
+          if (parsed is Map) feature = Map<String, dynamic>.from(parsed);
+        } catch (_) {}
+      }
+      if (feature == null) continue;
+
+      Map<String, dynamic> props = const {};
+      final p = feature['properties'];
+      if (p is Map) {
+        props = Map<String, dynamic>.from(p);
+      } else if (p is String) {
+        try {
+          final parsed = jsonDecode(p);
+          if (parsed is Map) props = Map<String, dynamic>.from(parsed);
+        } catch (_) {}
+      }
+
+      // Tippecanoe cluster bubbles — not real features.
+      if (props.containsKey('clustered') ||
+          props.containsKey('point_count') ||
+          props['cluster'] == true) {
+        continue;
+      }
+
+      final hasRef = _nonEmptyString(props['fc_ref']) != null ||
+          _nonEmptyString(props['_source_ref']) != null ||
+          _nonEmptyString(props['_featureId']) != null ||
+          _nonEmptyString(props['_attributes']) != null ||
+          _nonEmptyString(feature['id']) != null;
+      if (hasRef) return (feature, props);
+      fallback ??= (feature, props);
+    }
+    return fallback;
+  }
+
+  /// Resolve project layer UUID from MapLibre source / style layer ids.
+  /// Tile sources use `pt-s-{uuid}`, `ln-s-{uuid}`, `pg-s-{uuid}`.
+  String? _projectLayerIdFromMapHit(Map<String, dynamic>? feature) {
+    if (feature == null) return null;
+
+    final candidates = <String?>[
+      feature['source']?.toString(),
+      feature['layerId']?.toString(),
+      if (feature['layer'] is Map)
+        (feature['layer'] as Map)['id']?.toString(),
+      feature['layer'] is String ? feature['layer'] as String : null,
+    ];
+
+    for (final raw in candidates) {
+      final id = _projectLayerIdFromMapId(raw);
+      if (id != null) return id;
+    }
+
+    // Reverse-lookup registered style layer / source ids.
+    for (final entry in _mapSourceIdsByProjectLayer.entries) {
+      for (final sid in entry.value) {
+        if (candidates.contains(sid)) return entry.key;
+      }
+    }
+    for (final entry in _mapLayerIdsByProjectLayer.entries) {
+      for (final lid in entry.value) {
+        if (candidates.contains(lid)) return entry.key;
+      }
+    }
+    return null;
+  }
+
+  String? _projectLayerIdFromMapId(String? mapId) {
+    if (mapId == null || mapId.isEmpty) return null;
+    const prefixes = [
+      'pt-s-',
+      'pt-l-',
+      'ln-s-',
+      'ln-l-',
+      'pg-s-',
+      'pg-f-',
+      'pg-o-',
+      'colpt-s-',
+      'colpt-l-',
+      'colln-s-',
+      'colln-l-',
+      'colpg-s-',
+      'colpg-f-',
+      'colpg-o-',
+    ];
+    for (final p in prefixes) {
+      if (mapId.startsWith(p)) {
+        final id = mapId.substring(p.length);
+        if (id.isNotEmpty) return id;
+      }
+    }
+    return null;
+  }
+
+  /// Fallback when tiles lack fc_ref: nearest Point (or line start) in SQLite.
+  Future<db.ReferenceFeature?> _nearestReferenceFeature({
+    required db.AppDatabase database,
+    required String layerId,
+    required double lng,
+    required double lat,
+  }) async {
+    // ~25 m at equator; good enough for tap enrichment.
+    const maxDelta = 0.00025;
+    try {
+      final row = await database.customSelect(
+        '''
+        SELECT id FROM reference_features
+        WHERE project_id = ?
+          AND layer_id = ?
+          AND (
+            (
+              LOWER(COALESCE(json_extract(geometry, '\$.type'), '')) = 'point'
+              AND abs(json_extract(geometry, '\$.coordinates[0]') - ?) < ?
+              AND abs(json_extract(geometry, '\$.coordinates[1]') - ?) < ?
+            )
+            OR (
+              LOWER(COALESCE(json_extract(geometry, '\$.type'), '')) IN
+                ('linestring', 'multilinestring')
+              AND abs(json_extract(geometry, '\$.coordinates[0][0]') - ?) < ?
+              AND abs(json_extract(geometry, '\$.coordinates[0][1]') - ?) < ?
+            )
+          )
+        ORDER BY
+          abs(
+            COALESCE(
+              json_extract(geometry, '\$.coordinates[0]'),
+              json_extract(geometry, '\$.coordinates[0][0]')
+            ) - ?
+          ) + abs(
+            COALESCE(
+              json_extract(geometry, '\$.coordinates[1]'),
+              json_extract(geometry, '\$.coordinates[0][1]')
+            ) - ?
+          )
+        LIMIT 1
+        ''',
+        variables: [
+          Variable.withString(widget.project.id),
+          Variable.withString(layerId),
+          Variable.withReal(lng),
+          Variable.withReal(maxDelta),
+          Variable.withReal(lat),
+          Variable.withReal(maxDelta),
+          Variable.withReal(lng),
+          Variable.withReal(maxDelta),
+          Variable.withReal(lat),
+          Variable.withReal(maxDelta),
+          Variable.withReal(lng),
+          Variable.withReal(lat),
+        ],
+      ).getSingleOrNull();
+      final id = row?.data['id'] as String?;
+      if (id == null || id.isEmpty) return null;
+      return await (database.select(database.referenceFeatures)
+            ..where((r) => r.id.equals(id)))
+          .getSingleOrNull();
+    } catch (e) {
+      debugPrint('[map] proximity lookup failed: $e');
+      return null;
+    }
   }
 
   /// Maps a line_style preset to a MapLibre dash array.
@@ -3662,6 +5092,20 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
       default:
         return null;
     }
+  }
+
+  /// MapLibre iconSize multiplier for a style size in pixels (SVG rasterized at 64).
+  double _iconSizeFor(double sizePx) {
+    final s = sizePx / 64.0;
+    if (s < 0.2) return 0.2;
+    if (s > 2.5) return 2.5;
+    return s;
+  }
+
+  /// Unique image id so color/size changes replace the previous MapLibre image.
+  String _iconImageId(String key, String color, double size) {
+    final c = color.replaceAll('#', '').toLowerCase();
+    return 'icon-$key-$c-${size.round()}';
   }
 
   /// Rasterize an SVG string to PNG bytes for a MapLibre symbol image.
@@ -3705,8 +5149,14 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
     final layerNamesAsync =
         ref.watch(localLayerNamesProvider(widget.project.id));
 
-    ref.listen(localReferenceFeaturesProvider(widget.project.id), (prev, next) {
+    ref.listen(localLayersMetaProvider(widget.project.id), (prev, next) {
       if (next.hasValue && _styleLoaded) {
+        final prevCount = prev?.value?.length ?? 0;
+        final nextCount = next.value!.length;
+        if (nextCount > prevCount) {
+          _layerFetchAttempted.clear();
+          unawaited(_ensureVisibleLayerPacks(maxLayers: 20));
+        }
         final inEdit = _editState != null || _editStateLP != null;
         _renderFeatures(fitCamera: !inEdit);
       }
@@ -3747,8 +5197,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
             child: LayoutBuilder(
               builder: (context, constraints) {
                 final layout = LayoutOf(context);
-                final showSidePanel =
-                    layout.isTabletLandscape || layout.isWideTablet;
+                final showSidePanel = layout.useTabletMapChrome;
 
                 final mapStack = Stack(
                   children: [
@@ -3773,21 +5222,76 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                         _controller = controller;
                         controller.onFeatureTapped.add(_handleFeatureTap);
                       },
-                      onStyleLoadedCallback: () async {
+                      onStyleLoadedCallback: () {
                         _styleLoaded = true;
-                        await _renderFeatures();
+                        unawaited(_renderFeatures(fitCamera: true));
+                        unawaited(_ensureVisibleLayerPacks(maxLayers: 8));
 
-                        // If the "Show my location" setting is on when the map opens,
-                        // start streaming immediately.
                         final showMe =
                             ref.read(settingsProvider).value?.showMyLocation ??
                                 false;
                         if (showMe) {
                           _myLocationLastEnabled = true;
-                          await _syncMyLocation(true);
+                          unawaited(_syncMyLocation(true));
                         }
                       },
                     ),
+                    if (_layerFetchStatus != null)
+                      Positioned(
+                        top: 12,
+                        left: 12,
+                        right: 72,
+                        child: Material(
+                          elevation: 2,
+                          borderRadius: BorderRadius.circular(8),
+                          color: Theme.of(context).colorScheme.surface,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 8,
+                            ),
+                            child: Row(
+                              children: [
+                                const SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: Text(
+                                    _layerFetchStatus!,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style:
+                                        Theme.of(context).textTheme.bodySmall,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (_guideInfo != null)
+                      Positioned(
+                        left: 12,
+                        bottom: 88,
+                        right: (showSidePanel && _tabletPanelExpanded)
+                            ? _tabletPanelWidth + 88
+                            : 88,
+                        child: Align(
+                          alignment: Alignment.bottomLeft,
+                          child: ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 340),
+                            child: _GuideCard(
+                              info: _guideInfo!,
+                              onClose: _clearSelectedResultMarker,
+                            ),
+                          ),
+                        ),
+                      ),
                     // Legend button — phone/small tablet only. Hidden on tablet
                     // landscape because the legend is always visible in the side panel.
                     if (!showSidePanel)
@@ -3808,7 +5312,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                       curve: Curves.easeInOut,
                       bottom: 16,
                       right: (showSidePanel && _tabletPanelExpanded)
-                          ? 380 + 16
+                          ? _tabletPanelWidth + 16
                           : 16,
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
@@ -3960,15 +5464,37 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                                 label: 'Search',
                                 selected: false,
                                 onTap: () {
-                                  setState(() {
-                                    _tabletMode = _TabletMode.search;
-                                    _tabletPanelExpanded = true;
-                                  });
+                                  _openSearchPanel();
                                 },
                               ),
-                              // T1b.2 will add:
-                              //  - Inspector pill (when a feature is selected)
-                              //  - Capture pill (when a capture is in progress)
+                              if (_panelFeature != null) ...[
+                                const SizedBox(height: 8),
+                                MapModePill(
+                                  icon: Icons.info_outline,
+                                  label: 'Feature',
+                                  selected: false,
+                                  onTap: () {
+                                    setState(() {
+                                      _tabletMode = _TabletMode.feature;
+                                      _tabletPanelExpanded = true;
+                                    });
+                                  },
+                                ),
+                              ],
+                              if (_panelFormArgs != null) ...[
+                                const SizedBox(height: 8),
+                                MapModePill(
+                                  icon: Icons.edit_note_outlined,
+                                  label: 'Form',
+                                  selected: false,
+                                  onTap: () {
+                                    setState(() {
+                                      _tabletMode = _TabletMode.form;
+                                      _tabletPanelExpanded = true;
+                                    });
+                                  },
+                                ),
+                              ],
                             ],
                           ),
                         ),
@@ -3981,7 +5507,7 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                         top: 0,
                         right: 0,
                         bottom: 0,
-                        width: 380,
+                        width: _tabletPanelWidth,
                         child: MapSidePanel(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -4002,10 +5528,31 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                                     label: 'Search',
                                     selected: _tabletMode == _TabletMode.search,
                                     onTap: () {
-                                      setState(() =>
-                                          _tabletMode = _TabletMode.search);
+                                      _openSearchPanel(expandIfNeeded: false);
                                     },
                                   ),
+                                  if (_panelFeature != null)
+                                    MapSidePanelTab(
+                                      icon: Icons.info_outline,
+                                      label: 'Feature',
+                                      selected:
+                                          _tabletMode == _TabletMode.feature,
+                                      onTap: () {
+                                        setState(() =>
+                                            _tabletMode = _TabletMode.feature);
+                                      },
+                                    ),
+                                  if (_panelFormArgs != null)
+                                    MapSidePanelTab(
+                                      icon: Icons.edit_note_outlined,
+                                      label: 'Form',
+                                      selected:
+                                          _tabletMode == _TabletMode.form,
+                                      onTap: () {
+                                        setState(() =>
+                                            _tabletMode = _TabletMode.form);
+                                      },
+                                    ),
                                 ],
                                 onCollapse: () {
                                   setState(() => _tabletPanelExpanded = false);
@@ -4013,18 +5560,16 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                               ),
                               const SizedBox(height: 8),
                               Expanded(
-                                child: MapSidePanelSection(
-                                  child: _tabletMode == _TabletMode.layers
-                                      ? TabletMapLegend(
-                                          visible: _visible,
+                                child: (_tabletMode == _TabletMode.form ||
+                                        _tabletMode == _TabletMode.feature)
+                                    ? _buildTabletPanelBody(
+                                        layerNamesAsync: layerNamesAsync,
+                                      )
+                                    : MapSidePanelSection(
+                                        child: _buildTabletPanelBody(
                                           layerNamesAsync: layerNamesAsync,
-                                          onToggle: _toggleLayer,
-                                        )
-                                      : SearchPanel(
-                                          projectId: widget.project.id,
-                                          onResultTap: _onSearchResultTap,
                                         ),
-                                ),
+                                      ),
                               ),
                             ],
                           ),
@@ -4033,6 +5578,245 @@ class _MapProjectScreenState extends ConsumerState<MapProjectScreen> {
                   ],
                 );
               },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _GuideCard extends StatefulWidget {
+  final _GuideInfo info;
+  final Future<void> Function() onClose;
+
+  const _GuideCard({
+    required this.info,
+    required this.onClose,
+  });
+
+  @override
+  State<_GuideCard> createState() => _GuideCardState();
+}
+
+class _GuideCardState extends State<_GuideCard> {
+  bool _showAllSteps = false;
+
+  @override
+  void didUpdateWidget(covariant _GuideCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.info.steps.length != widget.info.steps.length ||
+        oldWidget.info.title != widget.info.title) {
+      _showAllSteps = false;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final info = widget.info;
+    final distance = info.distanceMeters == null
+        ? null
+        : info.distanceMeters! >= 1000
+            ? '${(info.distanceMeters! / 1000).toStringAsFixed(2)} km'
+            : '${info.distanceMeters!.round()} m';
+    final bearing = info.bearingDegrees == null
+        ? null
+        : '${_bearingArrow(info.bearingDegrees!)} ${_bearingCompass(info.bearingDegrees!)} ${info.bearingDegrees!.round()}°';
+
+    final steps = info.steps;
+    final nextStep = steps.isNotEmpty ? steps.first : null;
+    final moreSteps =
+        steps.length > 1 ? steps.sublist(1) : const <GuideDirectionStep>[];
+    final visibleMore =
+        _showAllSteps ? moreSteps : moreSteps.take(4).toList();
+    final hiddenCount = moreSteps.length - visibleMore.length;
+    final showDirections = info.title == 'Road guide' || steps.isNotEmpty;
+
+    return Material(
+      elevation: 3,
+      borderRadius: BorderRadius.circular(12),
+      color: theme.colorScheme.surface,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 8, 4, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  Icons.navigation_outlined,
+                  size: 18,
+                  color: theme.colorScheme.primary,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    distance == null ? 'Guide' : info.title,
+                    style: theme.textTheme.titleSmall?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                IconButton.filledTonal(
+                  tooltip: 'Dismiss guide',
+                  onPressed: widget.onClose,
+                  icon: const Icon(Icons.close, size: 20),
+                  style: IconButton.styleFrom(
+                    minimumSize: const Size(40, 40),
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+              ],
+            ),
+            if (distance != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                distance,
+                style: theme.textTheme.titleLarge?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+            if (bearing != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(
+                  bearing,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            if (showDirections) ...[
+              const SizedBox(height: 8),
+              Text(
+                'Directions',
+                style: theme.textTheme.labelMedium?.copyWith(
+                  color: theme.colorScheme.primary,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 4),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 160),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (nextStep != null)
+                        _DirectionLine(
+                          index: 1,
+                          step: nextStep,
+                          emphasized: true,
+                        ),
+                      ...visibleMore.asMap().entries.map(
+                            (e) => _DirectionLine(
+                              index: e.key + 2,
+                              step: e.value,
+                            ),
+                          ),
+                    ],
+                  ),
+                ),
+              ),
+              if (hiddenCount > 0)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: () =>
+                        setState(() => _showAllSteps = !_showAllSteps),
+                    child: Text(
+                      _showAllSteps
+                          ? 'Show fewer'
+                          : 'Show $hiddenCount more step${hiddenCount == 1 ? '' : 's'}',
+                    ),
+                  ),
+                ),
+            ],
+            Padding(
+              padding: EdgeInsets.only(top: showDirections ? 4 : 6),
+              child: Text(
+                info.hint,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _bearingArrow(double degrees) {
+    final idx = (((degrees % 360) + 22.5) ~/ 45) % 8;
+    const arrows = ['↑', '↗', '→', '↘', '↓', '↙', '←', '↖'];
+    return arrows[idx];
+  }
+
+  static String _bearingCompass(double degrees) {
+    final idx = (((degrees % 360) + 22.5) ~/ 45) % 8;
+    const labels = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+    return labels[idx];
+  }
+}
+
+class _DirectionLine extends StatelessWidget {
+  final int index;
+  final GuideDirectionStep step;
+  final bool emphasized;
+
+  const _DirectionLine({
+    required this.index,
+    required this.step,
+    this.emphasized = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+  final dist = step.distanceMeters > 0
+        ? GuideRouteService.formatDistancePublic(step.distanceMeters)
+        : null;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 22,
+            child: Text(
+              '$index.',
+              style: theme.textTheme.bodySmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: theme.colorScheme.primary,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  step.instruction,
+                  style: (emphasized
+                          ? theme.textTheme.bodyMedium
+                          : theme.textTheme.bodySmall)
+                      ?.copyWith(
+                    fontWeight:
+                        emphasized ? FontWeight.w600 : FontWeight.normal,
+                  ),
+                ),
+                if (dist != null)
+                  Text(
+                    dist,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+              ],
             ),
           ),
         ],
@@ -4201,6 +5985,8 @@ class _LayerBucket {
   final List<Map<String, dynamic>> points = [];
   final List<Map<String, dynamic>> lines = [];
   final List<Map<String, dynamic>> polys = [];
+
+  bool get isEmpty => points.isEmpty && lines.isEmpty && polys.isEmpty;
 }
 
 class _BoundsAccumulator {

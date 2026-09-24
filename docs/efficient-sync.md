@@ -13,38 +13,35 @@ Target architecture for Field Collector at 500+ concurrent field devices.
 | Pack | Contents | When |
 |------|----------|------|
 | **Core pack** | Project, forms, layer catalog, choice lists, assignments | Always on prepare |
-| **Reference pack (per layer)** | GeoJSON + optional mbtiles for one layer (AOI-clipped) | Working set / on demand |
+| **Reference pack (per layer)** | **mbtiles** when tippecanoe succeeds (tiles-only); GeoJSON fallback only if tiling fails | Lazy on map / optional bulk |
 | **Legacy full bundle** | Core + all published layer reference | Optional / small projects |
 
-### Core pack API (landed)
+### Tiles-only packs (scale path)
+
+When tippecanoe succeeds for a layer:
+
+- Pack includes `reference_tiles/{layerId}.mbtiles`
+- Full GeoJSON is **omitted** (`tiles_only: true` in manifest; empty stub FeatureCollection only)
+- Mobile seeds mbtiles to disk and does **not** insert hundreds of thousands of SQLite geometries
+- Map draws from vector tiles; tap attributes come from tile properties
+
+If tippecanoe fails, the pack falls back to GeoJSON (guarded / capped on device).
+
+### Core / reference pack APIs (landed)
 
 ```http
 GET /api/v1/projects/{projectID}/core-pack
-GET /api/v1/projects/{projectID}/core-pack/jobs/{jobID}
-```
-
-Equivalent to `GET .../bundle?reference_data=false` (layers catalog kept; no `reference_features` / `reference_tiles`).
-
-### Reference pack API (landed)
-
-```http
 GET /api/v1/projects/{projectID}/layers/{layerID}/reference-pack
-GET /api/v1/projects/{projectID}/layers/{layerID}/reference-pack/jobs/{jobID}
+GET /api/v1/projects/{projectID}/packs/manifest
 ```
 
-ZIP contains `reference_features/{layerId}.geojson`, optional `reference_tiles/{layerId}.mbtiles`, and `manifest.json`.
+Layer pack ZIP: `reference_tiles/{layerId}.mbtiles` (preferred), optional stub/full `reference_features/{layerId}.geojson`, `manifest.json` (`tiles_only`, `feature_count`, `has_mbtiles`).
+
+### Lazy layer download (mobile)
+
+Default **Download for offline** = **core only**. Opening the map downloads up to **5** visible layers that lack local tiles; toggling a layer on fetches that layer’s pack. Optional switch: “Also download all map layers now” for small projects.
 
 Working-set rule (product): auto-include layers on assignments + layers marked required offline; catalog may list all project layers.
-
-### Mobile client (landed)
-
-Default **Download for offline** on project detail:
-
-1. `GET .../core-pack` → seed catalog/forms/assignments (no ref wipe of other projects)
-2. Resolve working-set layer IDs (assignment `layer_id` if present, else all local layers)
-3. For each layer: `GET .../layers/{id}/reference-pack` → merge into local DB + mbtiles
-
-Legacy full bundle remains behind an optional toggle.
 
 ## Upload model (unchanged direction)
 

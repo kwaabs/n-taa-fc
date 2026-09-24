@@ -226,6 +226,8 @@ func main() {
 		slog.Error("failed to init app release handler", "error", err)
 		os.Exit(1)
 	}
+	routingService := service.NewRoutingService(cfg.OSRMBaseURL)
+	routingHandler := handler.NewRoutingHandler(routingService)
 
 	// ── Router ────────────────────────────────────────
 	r := chi.NewRouter()
@@ -285,6 +287,9 @@ func main() {
 
 		// Current user
 		r.Get("/api/v1/me", meHandler.Get)
+
+		// Map guide routing (proxies to OSRM-compatible backend).
+		r.Get("/api/v1/routing/guide", routingHandler.Guide)
 
 		// Reusable form templates (cross-project picker)
 		r.Get("/api/v1/form-templates", formHandler.ListTemplates)

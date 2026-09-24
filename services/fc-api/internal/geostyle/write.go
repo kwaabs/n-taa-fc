@@ -43,6 +43,15 @@ func MapFromFC(fc *model.LayerStyle, geometryType string, existingRaw json.RawMe
 			pt.Icon = name
 			pt.RenderAs = "symbol"
 		}
+		// Persist custom SVG only when not a shared pack icon (geo:…).
+		// Resolved pack styles also carry tinted icon_svg — do not write those back.
+		if strings.TrimSpace(def.IconSvg) != "" && !strings.HasPrefix(def.Icon, "geo:") {
+			pt.IconSvg = def.IconSvg
+			pt.RenderAs = "symbol"
+			pt.Icon = ""
+		} else {
+			pt.IconSvg = ""
+		}
 		geo.Point = pt
 
 	case "line":
@@ -83,6 +92,10 @@ func MapFromFC(fc *model.LayerStyle, geometryType string, existingRaw json.RawMe
 
 	default:
 		return nil, fmt.Errorf("unsupported geometry_type %q", geometryType)
+	}
+
+	if fc.Visibility != nil {
+		geo.FCVisibility = fc.Visibility
 	}
 
 	return json.Marshal(geo)

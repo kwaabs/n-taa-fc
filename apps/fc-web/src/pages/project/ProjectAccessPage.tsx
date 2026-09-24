@@ -22,6 +22,25 @@ export function ProjectAccessPage() {
   const memberList = Array.isArray(members) ? members : [];
   const teamList = Array.isArray(allTeams) ? allTeams : [];
 
+  const { data: me } = useQuery({
+    queryKey: ["me"],
+    queryFn: () => api.getMe(),
+  });
+  const myMembership = memberList.find((m: any) => m.user_id === me?.id);
+  const canManageMembers = me?.is_system_admin || myMembership?.role === "admin";
+
+  const roleBadgeClass = (role: string) => {
+    if (role === "admin") return "bg-red-50 text-red-600";
+    if (role === "supervisor") return "bg-purple-50 text-purple-600";
+    return "bg-blue-50 text-blue-600";
+  };
+
+  const roleLabel = (role: string) => {
+    if (role === "admin") return "Admin";
+    if (role === "supervisor") return "Supervisor";
+    return "Field worker";
+  };
+
   // All users for the picker (excludes those already direct members)
   const { data: allUsers } = useQuery({
     queryKey: ["users"],
@@ -47,7 +66,13 @@ export function ProjectAccessPage() {
 
   const addMemberMutation = useMutation({
     mutationFn: () => api.addMember(projectId!, memberEmail, memberRole),
-    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["members", projectId] }); setShowAddMember(false); setMemberEmail(""); },
+    onSuccess: () => { queryClient.invalidateQueries({ queryKey: ["members", projectId] }); setShowAddMember(false); setMemberEmail(""); setMemberRole("field_worker"); },
+  });
+
+  const roleMutation = useMutation({
+    mutationFn: ({ userId, newRole }: { userId: string; newRole: string }) =>
+      api.updateMemberRole(projectId!, userId, newRole),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["members", projectId] }),
   });
 
   const removeMemberMutation = useMutation({
@@ -94,7 +119,7 @@ export function ProjectAccessPage() {
       <div>
         <div className="flex items-center justify-between mb-4">
           <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2"><UserPlus className="h-5 w-5" /> Individual Members</h2>
-          <button onClick={() => setShowAddMember(true)} className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50">
+          <button onClick={() => setShowAddMember(true)} disabled={!canManageMembers} className="flex items-center gap-2 rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed">
             <Plus className="h-4 w-4" /> Add Member
           </button>
         </div>
@@ -111,9 +136,35 @@ export function ProjectAccessPage() {
               {memberList.map((m: any) => (
                 <tr key={m.user_id} className="border-b border-gray-100">
                   <td className="px-4 py-3 text-gray-900">{m.user?.email || m.user_id}</td>
-                  <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${m.user?.role === "admin" ? "bg-red-50 text-red-600" : m.user?.role === "supervisor" ? "bg-purple-50 text-purple-600" : "bg-blue-50 text-blue-600"}`}>{m.user?.role ?? "field_worker"}</span></td>
                   <td className="px-4 py-3">
-                    <button onClick={() => { if (confirm("Remove member?")) removeMemberMutation.mutate(m.user_id); }} className="text-red-500 hover:text-red-700"><Trash2 className="h-4 w-4" /></button>
+                    {canManageMembers ? (
+                      <select
+                        value={m.role ?? "field_worker"}
+                        disabled={roleMutation.isPending}
+                        onChange={(e) =>
+                          roleMutation.mutate({
+                            userId: m.user_id,
+                            newRole: e.target.value,
+                          })
+                        }
+                        className="rounded border border-gray-200 px-2 py-1 text-xs"
+                      >
+                        <option value="admin">Admin</option>
+                        <option value="supervisor">Supervisor</option>
+                        <option value="field_worker">Field worker</option>
+                      </select>
+                    ) : (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-xs ${roleBadgeClass(m.role ?? "field_worker")}`}
+                      >
+                        {roleLabel(m.role ?? "field_worker")}
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3">
+                    {canManageMembers && (
+                      <button onClick={() => { if (confirm("Remove member?")) removeMemberMutation.mutate(m.user_id); }} className="text-red-500 hover:text-red-700"><Trash2 className="h-4 w-4" /></button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -152,7 +203,7 @@ export function ProjectAccessPage() {
           <div className="bg-white rounded-xl shadow-xl p-6 w-full max-w-md" onClick={(e) => e.stopPropagation()}>
             <h2 className="text-lg font-semibold mb-4">Add Member</h2>
             <form onSubmit={(e) => { e.preventDefault(); addMemberMutation.mutate(); }} className="flex flex-col gap-4">
-            <div>
+              <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">User</label>
                 <select
                   value={memberEmail}
@@ -172,6 +223,19 @@ export function ProjectAccessPage() {
                     All users are already members.
                   </p>
                 )}
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Role</label>
+                <select
+                  value={memberRole}
+                  onChange={(e) => setMemberRole(e.target.value)}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                >
+                  <option value="field_worker">Field worker</option>
+                  <option value="supervisor">Supervisor</option>
+                  <option value="admin">Admin</option>
+                </select>
               </div>
 
               <div className="flex gap-3 justify-end">

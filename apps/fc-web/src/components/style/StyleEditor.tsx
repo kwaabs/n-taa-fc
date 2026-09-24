@@ -50,7 +50,8 @@ export function StyleEditor({ projectId, layerId }: Props) {
   });
 
   useEffect(() => {
-    if (isGeoLinked && tab !== "default") setTab("default");
+    // Linked dbo layers: Default + Visibility only (no Rules / feature labels).
+    if (isGeoLinked && tab === "rules") setTab("default");
   }, [isGeoLinked, tab]);
 
   if (isLoading || !style) {
@@ -141,6 +142,28 @@ export function StyleEditor({ projectId, layerId }: Props) {
     setShowIconPicker(null);
   };
 
+  const handleSvgSelected = (svg: string) => {
+    if (!showIconPicker) return;
+    if (showIconPicker.target === "default") {
+      setStyle({
+        ...style!,
+        default: {
+          ...style!.default,
+          icon: "custom:svg",
+          icon_svg: svg,
+        },
+      });
+    } else {
+      const idx = parseInt(showIconPicker.target);
+      const rule = style!.rules![idx];
+      updateRule(idx, {
+        ...rule,
+        style: { ...rule.style, icon: "custom:svg", icon_svg: svg },
+      });
+    }
+    setShowIconPicker(null);
+  };
+
   const tabBtn = (id: typeof tab, label: string, Icon: any) => (
     <button
       onClick={() => setTab(id)}
@@ -186,11 +209,15 @@ export function StyleEditor({ projectId, layerId }: Props) {
           </div>
         </div>
 
-        {/* Tabs — linked dbo layers only use Default (shared with geo) */}
+        {/* Tabs — linked dbo: Default + Visibility (rules/labels are FC-only) */}
         <div className="flex gap-1 border-b border-gray-200 px-5">
           {tabBtn("default", "Default", Palette)}
           {!isGeoLinked && tabBtn("rules", `Rules (${style.rules?.length || 0})`, ListChecks)}
-          {!isGeoLinked && tabBtn("label", "Label & Visibility", Type)}
+          {tabBtn(
+            "label",
+            isGeoLinked ? "Visibility" : "Label & Visibility",
+            Type,
+          )}
         </div>
 
         {/* Tab bodies */}
@@ -217,10 +244,11 @@ export function StyleEditor({ projectId, layerId }: Props) {
             />
           )}
 
-          {!isGeoLinked && tab === "label" && (
+          {tab === "label" && (
             <LabelVisibilityForm
               label={style.label}
               visibility={style.visibility}
+              showLabels={!isGeoLinked}
               onLabelChange={updateLabel}
               onVisibilityChange={updateVisibility}
             />
@@ -249,6 +277,7 @@ export function StyleEditor({ projectId, layerId }: Props) {
           }
           sharedSymbolsOnly={isGeoLinked}
           onSelect={handleIconSelected}
+          onSelectSvg={handleSvgSelected}
           onClose={() => setShowIconPicker(null)}
         />
       )}
@@ -320,11 +349,11 @@ function DefaultStyleForm({
         </div>
       )}
 
-      {isPoint && !sharedSymbols && (
+      {isPoint && (
         <div className="col-span-2">
           <div className="flex items-center justify-between mb-1">
             <label className="block text-xs font-medium text-gray-600">
-              Custom SVG (optional — overrides icon)
+              Custom SVG (optional — overrides map symbol)
             </label>
             <label className="cursor-pointer text-xs text-blue-600 hover:underline">
               Upload .svg
@@ -338,6 +367,7 @@ function DefaultStyleForm({
                   const reader = new FileReader();
                   reader.onload = () => {
                     handleSvgInput(String(reader.result || ""));
+                    onChange("icon", "custom:svg");
                   };
                   reader.readAsText(file);
                   e.target.value = "";
@@ -347,8 +377,14 @@ function DefaultStyleForm({
           </div>
           <textarea
             value={style.icon_svg || ""}
-            onChange={(e) => onChange("icon_svg", e.target.value)}
-            onBlur={(e) => handleSvgInput(e.target.value)}
+            onChange={(e) => {
+              onChange("icon_svg", e.target.value);
+              if (e.target.value.trim()) onChange("icon", "custom:svg");
+            }}
+            onBlur={(e) => {
+              handleSvgInput(e.target.value);
+              if (e.target.value.trim()) onChange("icon", "custom:svg");
+            }}
             placeholder='<svg viewBox="0 0 24 24">...</svg>'
             rows={4}
             className={`w-full rounded border px-2 py-1.5 text-xs font-mono ${
@@ -472,10 +508,11 @@ function RulesList({
 // ── Label & visibility form ────────────────────────────
 
 function LabelVisibilityForm({
-  label, visibility, onLabelChange, onVisibilityChange,
+  label, visibility, showLabels = true, onLabelChange, onVisibilityChange,
 }: any) {
   return (
     <div className="flex flex-col gap-5">
+      {showLabels && (
       <section>
         <h4 className="text-sm font-semibold text-gray-900 mb-3">Label</h4>
         <div className="grid grid-cols-2 gap-3">
@@ -526,11 +563,16 @@ function LabelVisibilityForm({
           </Field>
         </div>
       </section>
+      )}
 
-      <section className="border-t border-gray-100 pt-5">
-        <h4 className="text-sm font-semibold text-gray-900 mb-3">Visibility</h4>
+      <section className={showLabels ? "border-t border-gray-100 pt-5" : ""}>
+        <h4 className="text-sm font-semibold text-gray-900 mb-1">Map visibility (zoom)</h4>
+        <p className="text-xs text-gray-500 mb-3">
+          Shown when zoom ≥ min and &lt; max. Example: min 12 for conductors only
+          when zoomed in; max 12 to hide when zoomed past street level.
+        </p>
         <div className="grid grid-cols-3 gap-3">
-          <Field label="Min zoom">
+          <Field label="Min zoom (show from)">
             <input
               type="number"
               value={visibility?.min_zoom ?? 0}
@@ -538,7 +580,7 @@ function LabelVisibilityForm({
               className="w-full rounded border border-gray-300 px-2 py-1.5 text-sm"
             />
           </Field>
-          <Field label="Max zoom">
+          <Field label="Max zoom (hide from)">
             <input
               type="number"
               value={visibility?.max_zoom ?? 22}
