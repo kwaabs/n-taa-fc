@@ -19,7 +19,7 @@ COPY --from=tippecanoe /usr/local/bin/tile-join /usr/local/bin/
 COPY --from=tippecanoe /usr/local/bin/tippecanoe-decode /usr/local/bin/
 
 WORKDIR /work
-COPY server.py /server.py
+COPY docker/tippecanoe/server.py /server.py
 RUN chmod +x /server.py
 
 EXPOSE 8080
