@@ -26,7 +26,7 @@ x-traefik-common: &traefik-common
 
 services:
 # ── PostgreSQL (PostGIS) ───────────────────────────────────
-  postgres:
+  fc-postgres:
     image: supabase/postgres:15.14.1.095
     restart: unless-stopped
     command: postgres -c config_file=/etc/postgresql/postgresql.conf
@@ -53,7 +53,7 @@ services:
       dockerfile: docker/fc-migrate/Dockerfile
     restart: "no"
     command:
-      - "postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable"
+      - "postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@fc-postgres:5432/ntaafc?sslmode=disable"
       - "up"
     depends_on:
       geo-migrate:
@@ -74,12 +74,12 @@ services:
     command:
       - |
         set -e
-        psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/002_azure_auth.sql
-        psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/003_layer_permissions.sql
-        psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 \
+        psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/002_azure_auth.sql
+        psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/003_layer_permissions.sql
+        psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 \
           -c "ALTER ROLE geo_app PASSWORD '$$GEO_APP_PASSWORD';"
     depends_on:
-      postgres:
+      fc-postgres:
         condition: service_healthy
     networks:
       - coolify
@@ -152,7 +152,7 @@ services:
     environment:
       GOTRUE_DB_DRIVER: postgres
       GOTRUE_DB_NAMESPACE: auth
-      GOTRUE_DB_DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable&search_path=auth
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@fc-postgres:5432/ntaafc?sslmode=disable&search_path=auth
 
       GOTRUE_API_HOST: 0.0.0.0
       GOTRUE_API_PORT: 8081
@@ -182,7 +182,7 @@ services:
       GOTRUE_EXTERNAL_GOOGLE_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOTRUE_EXTERNAL_GOOGLE_REDIRECT_URI: https://${GOTRUE_HOST}/callback
     depends_on:
-      postgres:
+      fc-postgres:
         condition: service_healthy
       geo-migrate:
         condition: service_completed_successfully
@@ -205,7 +205,7 @@ services:
     image: ghcr.io/maplibre/martin:latest
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgres://geo_app:${SERVICE_PASSWORD_GEOAPP}@postgres:5432/ntaafc?sslmode=disable
+      DATABASE_URL: postgres://geo_app:${SERVICE_PASSWORD_GEOAPP}@fc-postgres:5432/ntaafc?sslmode=disable
       FC_WEB_URL: https://${FC_WEB_HOST}
       GEO_WEB_URL: https://${GEO_WEB_HOST}
       FC_API_URL: https://${FC_API_HOST}
@@ -214,7 +214,7 @@ services:
       - ./infra/martin/config.coolify.yaml:/config/config.yaml:ro
     command: ["--config", "/config/config.yaml"]
     depends_on:
-      postgres:
+      fc-postgres:
         condition: service_healthy
       geo-migrate:
         condition: service_completed_successfully
@@ -256,7 +256,7 @@ services:
     environment:
       PORT: "5355"
       ENV: production
-      DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable
+      DATABASE_URL: postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@fc-postgres:5432/ntaafc?sslmode=disable
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-20}
       DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-5}
       DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-30m}
@@ -273,7 +273,7 @@ services:
       TIPPECANOE_URL: http://tippecanoe:8080
       AUTH_PROFILE_UPSERT_TTL: ${AUTH_PROFILE_UPSERT_TTL:-5m}
     depends_on:
-      postgres:
+      fc-postgres:
         condition: service_healthy
       geo-migrate:
         condition: service_completed_successfully
@@ -312,7 +312,7 @@ services:
       API_PORT: "5442"
       API_ENV: production
       API_LOG_LEVEL: info
-      DATABASE_URL: postgres://geo_app:${SERVICE_PASSWORD_GEOAPP}@postgres:5432/ntaafc?sslmode=disable
+      DATABASE_URL: postgres://geo_app:${SERVICE_PASSWORD_GEOAPP}@fc-postgres:5432/ntaafc?sslmode=disable
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-20}
       DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-5}
       DB_CONN_MAX_LIFETIME: ${DB_CONN_MAX_LIFETIME:-30m}
@@ -329,7 +329,7 @@ services:
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-rustfsadmin}
       S3_SECRET_KEY: ${SERVICE_PASSWORD_RUSTFS}
     depends_on:
-      postgres:
+      fc-postgres:
         condition: service_healthy
       geo-migrate:
         condition: service_completed_successfully
