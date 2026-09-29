@@ -25,7 +25,7 @@ x-traefik-common: &traefik-common
   traefik.docker.network: coolify
 
 services:
-  # ── PostgreSQL (PostGIS) ───────────────────────────────────
+# ── PostgreSQL (PostGIS) ───────────────────────────────────
   postgres:
     image: supabase/postgres:15.14.1.095
     restart: unless-stopped
@@ -35,7 +35,7 @@ services:
       POSTGRES_DB: ntaafc
     volumes:
       - coolify-pgdata:/var/lib/postgresql/data
-      - ./infra/postgres:/docker-entrypoint-initdb.d:ro
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
       - ./infra/postgres:/sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U supabase_admin -d ntaafc"]
@@ -56,8 +56,8 @@ services:
       - "postgres://supabase_admin:${SERVICE_PASSWORD_POSTGRES}@postgres:5432/ntaafc?sslmode=disable"
       - "up"
     depends_on:
-      postgres:
-        condition: service_healthy
+      geo-migrate:
+        condition: service_completed_successfully
     networks:
       - coolify
 
@@ -79,8 +79,8 @@ services:
         psql -h postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 \
           -c "ALTER ROLE geo_app PASSWORD '$$GEO_APP_PASSWORD';"
     depends_on:
-      fc-migrate:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     networks:
       - coolify
 

@@ -19,6 +19,7 @@ CREATE EXTENSION IF NOT EXISTS "citext";
 -- ─────────────────────────────────────────────
 CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION CURRENT_USER;
 CREATE SCHEMA IF NOT EXISTS dbo AUTHORIZATION CURRENT_USER;
+CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION CURRENT_USER;
 
 COMMENT ON SCHEMA app IS 'Application metadata: users, auth, layer registry.';
 COMMENT ON SCHEMA dbo IS 'GIS data tables. Owned by you. Served by Martin.';
@@ -79,7 +80,7 @@ CREATE TABLE IF NOT EXISTS app.users (
   email         citext NOT NULL UNIQUE,
   display_name  text   NOT NULL,
   role          text   NOT NULL DEFAULT 'viewer'
-                       CHECK (role IN ('superuser', 'editor', 'viewer')),
+                       CHECK (role IN ('superuser', 'supervisor', 'editor', 'viewer')),
   status        text   NOT NULL DEFAULT 'active'
                        CHECK (status IN ('active', 'disabled')),
   created_at    timestamptz NOT NULL DEFAULT now(),
