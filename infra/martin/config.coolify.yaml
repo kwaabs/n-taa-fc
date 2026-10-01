@@ -1,5 +1,12 @@
-# Martin config for Coolify — CORS origins come from env (set in compose).
+# Martin config for Coolify.
 # Docs: https://maplibre.org/martin/
+#
+# NOTE: cors.origin is hardcoded, not ${VAR}-substituted. Martin only expands
+# env vars for a handful of known fields (e.g. postgres.connection_string
+# below) — cors.origin is passed through literally, so "${FC_WEB_URL}" would
+# reach actix-cors as a literal string and crash the server with
+# "invalid uri character". Keep these in sync with FC_WEB_HOST / GEO_WEB_HOST
+# / FC_API_HOST in the Coolify environment variables.
 
 listen_addresses: "0.0.0.0:3000"
 
@@ -7,9 +14,9 @@ worker_processes: 2
 
 cors:
   origin:
-    - "${FC_WEB_URL}"
-    - "${GEO_WEB_URL}"
-    - "${FC_API_URL}"
+    - "https://taa-field-web.ntaa.ecggh.com"
+    - "https://taa-web.ntaa.ecggh.com"
+    - "https://taa-field-api.ntaa.ecggh.com"
 
 postgres:
   connection_string: ${DATABASE_URL}
