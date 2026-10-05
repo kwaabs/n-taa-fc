@@ -8,6 +8,7 @@ import {
   FileText,
   Map as MapIcon,
   Lasso,
+  Globe,
 } from "lucide-react";
 import { downloadFile } from "@/lib/api";
 import { useMapContext } from "@/features/map/context/MapContext";
@@ -21,7 +22,7 @@ import {
   toastFailProgress,
 } from "@/features/notifications/store";
 
-export type ExportFormat = "csv" | "xlsx" | "geojson";
+export type ExportFormat = "csv" | "xlsx" | "geojson" | "kmz";
 type ExportMode = "viewport" | "selection";
 
 interface Props {
@@ -52,6 +53,7 @@ const FORMATS: {
   { format: "csv", label: "CSV", icon: FileText, ext: "csv" },
   { format: "xlsx", label: "Excel", icon: FileSpreadsheet, ext: "xlsx" },
   { format: "geojson", label: "GeoJSON", icon: FileJson, ext: "geojson" },
+  { format: "kmz", label: "KMZ (Google Earth)", icon: Globe, ext: "kmz" },
 ];
 
 export function ExportButton({

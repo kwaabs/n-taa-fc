@@ -43,6 +43,7 @@ func (s *Server) mountRoutes() {
 			r.Use(s.deps.AuthMW.RequireRole(auth.RoleSuperuser))
 
 			r.Get("/", s.deps.AuthHandler.UsersList)
+			r.Get("/login-history", s.deps.AuthHandler.LoginHistory)
 			r.Patch("/{id}", s.deps.AuthHandler.UsersUpdate)
 			r.Patch("/{id}/approve", s.deps.AuthHandler.UsersApprove)
 		})

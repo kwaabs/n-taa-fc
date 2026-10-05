@@ -432,6 +432,20 @@ func (h *Handler) Export(w http.ResponseWriter, r *http.Request) {
             h.logger.Error("geojson export failed", "err", err.Error())
         }
 
+    case "kmz":
+        filename := "export_" + stamp + ".kmz"
+        w.Header().Set("Content-Type", "application/vnd.google-earth.kmz")
+        w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+        layerName := "Export"
+        if l, err := h.svc.LayerName(r.Context(), layerID); err == nil {
+            layerName = l
+        }
+        if err := h.svc.StreamKMZ(r.Context(), layerID.String(), ExportCSVParams{
+            Geometry: req.Within, Sort: req.Sort, Columns: req.Columns, Filters: req.Filters,
+        }, layerName, w); err != nil {
+            h.logger.Error("kmz export failed", "err", err.Error())
+        }
+
     default:
         httpx.BadRequest(w, "unsupported format: "+fmtParam)
     }

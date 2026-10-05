@@ -25,3 +25,18 @@ export interface UpdateUserRequest {
   role?: Role;
   status?: Status;
 }
+
+export interface LoginEvent {
+  id: string;
+  created_at: string;
+  ip_address: string;
+  email: string;
+  user_id?: string;
+  display_name?: string;
+  role?: Role;
+}
+
+export interface LoginHistoryResponse {
+  events: LoginEvent[];
+  total: number;
+}
