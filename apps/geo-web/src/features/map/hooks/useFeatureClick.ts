@@ -3,6 +3,8 @@ import { useMapContext } from "../context/MapContext";
 import { useLayers } from "@/features/layers/hooks";
 import { useLayersStore } from "@/features/layers/store";
 import { useSelectionStore } from "@/features/features/store";
+import { usePickerStore } from "@/features/features/pickerStore";
+import type { PickerCandidate } from "@/features/features/pickerStore";
 import { useMeasureStore } from "@/features/spatial/measureStore";
 import { useSelectStore } from "@/features/spatial/selectStore";
 import type { Layer } from "@/features/layers/types";
@@ -23,6 +25,7 @@ export function useFeatureClick() {
   const { data: layers } = useLayers();
   const visibleIds = useLayersStore((s) => s.visibleIds);
   const setSelection = useSelectionStore((s) => s.setSelection);
+  const openPicker = usePickerStore((s) => s.openMenu);
 
   const measureMode = useMeasureStore((s) => s.mode);
   const measureFrozen = useMeasureStore((s) => s.frozen);
@@ -68,20 +71,44 @@ export function useFeatureClick() {
         return;
       }
 
-      const hit = hits[0];
-      const layer = styleIdToLayer.get(hit.layer.id);
-      if (!layer) return;
+      // A single logical feature can match more than one style sub-layer
+      // (e.g. a polygon's __fill and __line), so dedup by layer + ogc_fid
+      // before deciding whether to show the picker.
+      const seen = new Set<string>();
+      const candidates: PickerCandidate[] = [];
+      for (const hit of hits) {
+        const layer = styleIdToLayer.get(hit.layer.id);
+        if (!layer) continue;
 
-      const rawId = hit.id ?? (hit.properties?.ogc_fid as number | undefined);
-      if (rawId == null) return;
+        const rawId = hit.id ?? (hit.properties?.ogc_fid as number | undefined);
+        if (rawId == null) continue;
 
-      const ogcFid = Number(rawId);
-      if (!Number.isFinite(ogcFid)) return;
+        const ogcFid = Number(rawId);
+        if (!Number.isFinite(ogcFid)) continue;
 
-      setSelection({
-        layerId: layer.id,
-        layerName: layer.display_name,
-        ogcFid,
+        const key = `${layer.id}:${ogcFid}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        candidates.push({
+          layerId: layer.id,
+          layerName: layer.display_name,
+          ogcFid,
+          label: `${layer.display_name} #${ogcFid}`,
+        });
+      }
+
+      if (candidates.length === 0) return;
+
+      if (candidates.length === 1) {
+        setSelection(candidates[0]);
+        return;
+      }
+
+      openPicker({
+        x: e.originalEvent.clientX,
+        y: e.originalEvent.clientY,
+        candidates,
       });
     };
 
