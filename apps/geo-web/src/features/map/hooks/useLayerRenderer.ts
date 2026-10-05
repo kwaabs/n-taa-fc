@@ -7,14 +7,7 @@ import { useLayersStore } from "@/features/layers/store";
 import { applyLayerStyle } from "./layerStyle";
 import { sortByPriority, layerPriority } from "./layerOrder";
 import type { Layer } from "@/features/layers/types";
-
-const STYLE_SUFFIXES = [
-  "__circle",
-  "__line",
-  "__fill",
-  "__outline",
-  "__centroid",
-] as const;
+import { STYLE_SUFFIXES, styleLayerIdsFor } from "./styleLayers";
 
 // A dummy top-of-stack layer. Every data layer is inserted BELOW it.
 // Overlays (selection highlight, query, measure) are added AFTER data
@@ -35,10 +28,6 @@ function ensureTopMarker(map: maplibregl.Map) {
     source: TOP_MARKER,
     paint: { "circle-radius": 0 },
   });
-}
-
-function styleLayerIdsFor(layer: Layer): string[] {
-  return STYLE_SUFFIXES.map((s) => `${layer.name}${s}`);
 }
 
 function addLayerToMap(map: maplibregl.Map, layer: Layer) {

@@ -8,12 +8,7 @@ import { useMeasureStore } from "@/features/spatial/measureStore";
 import { useSelectStore } from "@/features/spatial/selectStore";
 import type { Layer } from "@/features/layers/types";
 import type { Feature } from "@/features/features/types";
-
-const STYLE_SUFFIXES = ["__circle", "__line", "__fill"] as const;
-
-function styleLayerIdsFor(layer: Layer): string[] {
-  return STYLE_SUFFIXES.map((s) => `${layer.name}${s}`);
-}
+import { styleLayerIdsFor } from "./styleLayers";
 
 export function useFeatureContextMenu() {
   const { getMap } = useMapContext();

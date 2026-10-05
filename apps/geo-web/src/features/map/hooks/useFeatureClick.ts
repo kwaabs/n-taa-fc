@@ -8,12 +8,7 @@ import type { PickerCandidate } from "@/features/features/pickerStore";
 import { useMeasureStore } from "@/features/spatial/measureStore";
 import { useSelectStore } from "@/features/spatial/selectStore";
 import type { Layer } from "@/features/layers/types";
-
-const STYLE_SUFFIXES = ["__circle", "__line", "__fill"] as const;
-
-function styleLayerIdsFor(layer: Layer): string[] {
-  return STYLE_SUFFIXES.map((s) => `${layer.name}${s}`);
-}
+import { styleLayerIdsFor } from "./styleLayers";
 
 /**
  * Handles feature clicks + hover cursor.
