@@ -78,6 +78,58 @@ func (h *Handler) UsersList(w http.ResponseWriter, r *http.Request) {
     httpx.JSON(w, http.StatusOK, UsersListResponse{Users: dtos, Total: total})
 }
 
+// LoginEventDTO — one entry in the login history list.
+type LoginEventDTO struct {
+    ID          uuid.UUID  `json:"id"`
+    CreatedAt   time.Time  `json:"created_at"`
+    IPAddress   string     `json:"ip_address"`
+    Email       string     `json:"email"`
+    UserID      *uuid.UUID `json:"user_id,omitempty"`
+    DisplayName string     `json:"display_name,omitempty"`
+    Role        string     `json:"role,omitempty"`
+}
+
+type LoginHistoryResponse struct {
+    Events []LoginEventDTO `json:"events"`
+    Total  int64           `json:"total"`
+}
+
+// LoginHistory — GET /api/v1/users/login-history
+// Query params: q (email search), page, limit
+func (h *Handler) LoginHistory(w http.ResponseWriter, r *http.Request) {
+    q := r.URL.Query()
+
+    page := parseIntDefault(q.Get("page"), 1)
+    limit := parseIntDefault(q.Get("limit"), 50)
+    if limit > 200 {
+        limit = 200
+    }
+    offset := (page - 1) * limit
+
+    events, total, err := h.svc.ListLoginEvents(r.Context(), LoginEventFilter{
+        Email: q.Get("q"),
+    }, offset, limit)
+    if err != nil {
+        httpx.Internal(w, h.logger, err)
+        return
+    }
+
+    dtos := make([]LoginEventDTO, 0, len(events))
+    for _, ev := range events {
+        dtos = append(dtos, LoginEventDTO{
+            ID:          ev.ID,
+            CreatedAt:   ev.CreatedAt,
+            IPAddress:   ev.IPAddress,
+            Email:       ev.Email,
+            UserID:      ev.UserID,
+            DisplayName: ev.DisplayName,
+            Role:        ev.Role,
+        })
+    }
+
+    httpx.JSON(w, http.StatusOK, LoginHistoryResponse{Events: dtos, Total: total})
+}
+
 // UsersUpdate — PATCH /api/v1/users/:id
 func (h *Handler) UsersUpdate(w http.ResponseWriter, r *http.Request) {
     targetID, ok := parseUserID(w, r)

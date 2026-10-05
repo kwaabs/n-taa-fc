@@ -78,6 +78,7 @@ services:
         set -e
         psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/002_azure_auth.sql
         psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/003_layer_permissions.sql
+        psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 -f /sql/migrations/004_login_audit_grants.sql
         psql -h fc-postgres -U supabase_admin -d ntaafc -v ON_ERROR_STOP=1 \
           -c "ALTER ROLE geo_app PASSWORD '$$GEO_APP_PASSWORD';"
     depends_on:

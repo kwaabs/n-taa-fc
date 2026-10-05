@@ -3,6 +3,7 @@ import { api } from "@/lib/api";
 import { toastError, toastSuccess } from "@/features/notifications/store";
 import type {
   AdminUser,
+  LoginHistoryResponse,
   Role,
   UpdateUserRequest,
   UsersListResponse,
@@ -30,6 +31,29 @@ export function useUsers(filter: ListFilter = {}) {
   return useQuery({
     queryKey: ["users", filter],
     queryFn: () => api<UsersListResponse>(`/api/v1/users${qs ? `?${qs}` : ""}`),
+    staleTime: 5000,
+  });
+}
+
+interface LoginHistoryFilter {
+  q?: string;
+  page?: number;
+  limit?: number;
+}
+
+export function useLoginHistory(filter: LoginHistoryFilter = {}) {
+  const params = new URLSearchParams();
+  if (filter.q) params.set("q", filter.q);
+  if (filter.page) params.set("page", String(filter.page));
+  if (filter.limit) params.set("limit", String(filter.limit));
+  const qs = params.toString();
+
+  return useQuery({
+    queryKey: ["login-history", filter],
+    queryFn: () =>
+      api<LoginHistoryResponse>(
+        `/api/v1/users/login-history${qs ? `?${qs}` : ""}`,
+      ),
     staleTime: 5000,
   });
 }

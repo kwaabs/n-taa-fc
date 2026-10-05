@@ -184,6 +184,10 @@ func (s *Service) ListUsers(ctx context.Context, f UserListFilter, offset, limit
     return s.repo.ListUsers(ctx, f, offset, limit)
 }
 
+func (s *Service) ListLoginEvents(ctx context.Context, f LoginEventFilter, offset, limit int) ([]LoginEvent, int64, error) {
+    return s.repo.ListLoginEvents(ctx, f, offset, limit)
+}
+
 func (s *Service) UpdateUser(ctx context.Context, id uuid.UUID, req UpdateUserRequest) (*User, error) {
     u, err := s.repo.GetUserByID(ctx, id)
     if err != nil {

@@ -3,7 +3,7 @@ import { X, Users, Layers as LayersIcon, ClipboardList } from "lucide-react";
 import { useAdminStore, type AdminTab } from "./store";
 import { UsersTab } from "./tabs/UsersTab";
 import { LayersTab } from "./tabs/LayersTab";
-import { AuditTabPlaceholder } from "./tabs/AuditTabPlaceholder";
+import { AuditTab } from "./tabs/AuditTab";
 
 interface TabDef {
   id: AdminTab;
@@ -90,7 +90,7 @@ export function AdminModal() {
           <div className="min-h-0 flex-1 overflow-y-auto p-5">
             {activeTab === "users" && <UsersTab />}
             {activeTab === "layers" && <LayersTab />}
-            {activeTab === "audit" && <AuditTabPlaceholder />}
+            {activeTab === "audit" && <AuditTab />}
           </div>
         </div>
       </div>
