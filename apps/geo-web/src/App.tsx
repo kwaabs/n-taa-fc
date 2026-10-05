@@ -10,6 +10,7 @@ import { LoginScreen } from "@/features/auth/LoginScreen";
 import { AuthCallback } from "@/features/auth/AuthCallback";
 
 import { FeatureDrawer } from "@/features/features/FeatureDrawer";
+import { FeaturePickerMenu } from "@/features/features/FeaturePickerMenu";
 import { useAuthStore } from "@/features/auth/store";
 import { bootstrapAuth } from "@/features/auth/hooks";
 import { queryClient } from "@/lib/queryClient";
@@ -57,6 +58,7 @@ function AuthGate() {
           <MapCanvas />
           <MapToolCluster />
           <FeatureDrawer />
+          <FeaturePickerMenu />
           <ResultsTable />
           <BufferMenu />
           <PrintModal />
