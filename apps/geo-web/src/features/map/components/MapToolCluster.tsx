@@ -14,6 +14,7 @@ import {
   Ruler as ScaleIcon,
   Map as MapIcon,
   MapPinOff,
+  Download,
 } from "lucide-react";
 import { useMapContext } from "../context/MapContext";
 import { useToolClusterStore } from "../store/toolClusterStore";
@@ -32,6 +33,7 @@ import {
 import { useSelectStore } from "@/features/spatial/selectStore";
 import { useSelectionStore } from "@/features/features/store";
 import type { Feature } from "@/features/features/types";
+import { useBundleExportStore } from "@/features/spatial/bundleExportStore";
 
 interface ScaleReading {
   meters: number;
@@ -75,6 +77,7 @@ export function MapToolCluster() {
 
   const { setBasemapVisible } = useBasemapToggle();
   const [basemapOn, setBasemapOn] = useState(true);
+  const openBundleExport = useBundleExportStore((s) => s.openDialog);
 
   useEffect(() => {
     const map = getMap();
@@ -204,6 +207,16 @@ export function MapToolCluster() {
             Basemap on
           </>
         )}
+      </button>
+
+      {/* Export multiple layers */}
+      <button
+        onClick={openBundleExport}
+        className="flex items-center gap-1 rounded-md border border-slate-200 bg-white/95 px-2 py-1 text-xs text-slate-600 shadow-md backdrop-blur hover:bg-slate-50"
+        title="Export multiple layers"
+      >
+        <Download className="h-3 w-3" />
+        Export layers
       </button>
     </div>
   );
