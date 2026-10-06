@@ -48,6 +48,11 @@ func (s *Server) mountRoutes() {
 			r.Patch("/{id}/approve", s.deps.AuthHandler.UsersApprove)
 		})
 
+		r.Route("/export", func(r chi.Router) {
+			r.Use(s.deps.AuthMW.RequireUser)
+			r.Post("/bundle.{fmt}", s.deps.FeaturesHandler.BundleExport)
+		})
+
 		r.Route("/layers", func(r chi.Router) {
 			r.Use(s.deps.AuthMW.RequireUser)
 
