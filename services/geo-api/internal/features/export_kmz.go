@@ -24,6 +24,85 @@ func (s *Service) StreamKMZ(
     layerName string,
     w io.Writer,
 ) error {
+    zw := zip.NewWriter(w)
+    kw, err := zw.Create("doc.kml")
+    if err != nil {
+        return err
+    }
+
+    if _, err := io.WriteString(kw, kmlHeader(layerName)); err != nil {
+        return err
+    }
+
+    if err := s.writeKMLPlacemarks(ctx, kw, layerID, layerName, params); err != nil {
+        return err
+    }
+
+    if _, err := io.WriteString(kw, kmlFooter()); err != nil {
+        return err
+    }
+
+    return zw.Close()
+}
+
+// StreamKMZBundle writes several layers into ONE KMZ, one <Folder> per
+// layer (Google Earth renders folders as sub-layers in its sidebar).
+// Layers that fail to resolve/stream are skipped rather than failing the
+// whole bundle.
+func (s *Service) StreamKMZBundle(
+    ctx context.Context,
+    layers []BundleLayer,
+    within json.RawMessage,
+    docName string,
+    w io.Writer,
+) (skipped []string, err error) {
+    zw := zip.NewWriter(w)
+    kw, err := zw.Create("doc.kml")
+    if err != nil {
+        return nil, err
+    }
+
+    if _, err := io.WriteString(kw, kmlHeader(docName)); err != nil {
+        return nil, err
+    }
+
+    wroteAny := false
+    for _, l := range layers {
+        params := ExportCSVParams{Geometry: within}
+
+        if _, err := io.WriteString(kw, "<Folder><name>"+xmlEscape(l.Name)+"</name>"); err != nil {
+            return skipped, err
+        }
+        if werr := s.writeKMLPlacemarks(ctx, kw, l.ID, l.Name, params); werr != nil {
+            skipped = append(skipped, l.Name)
+        } else {
+            wroteAny = true
+        }
+        if _, err := io.WriteString(kw, "</Folder>"); err != nil {
+            return skipped, err
+        }
+    }
+
+    if !wroteAny {
+        return skipped, ErrInvalidInput
+    }
+
+    if _, err := io.WriteString(kw, kmlFooter()); err != nil {
+        return skipped, err
+    }
+
+    return skipped, zw.Close()
+}
+
+// writeKMLPlacemarks streams one layer's features as KML <Placemark>
+// elements into kw.
+func (s *Service) writeKMLPlacemarks(
+    ctx context.Context,
+    kw io.Writer,
+    layerID string,
+    layerName string,
+    params ExportCSVParams,
+) error {
     if len(params.Geometry) == 0 {
         return ErrInvalidInput
     }
@@ -37,17 +116,7 @@ func (s *Service) StreamKMZ(
         return err
     }
 
-    zw := zip.NewWriter(w)
-    kw, err := zw.Create("doc.kml")
-    if err != nil {
-        return err
-    }
-
-    if _, err := io.WriteString(kw, kmlHeader(layerName)); err != nil {
-        return err
-    }
-
-    err = s.repo.StreamByGeometryWithGeom(ctx, t, params.Geometry, params.Filters, params.Sort,
+    return s.repo.StreamByGeometryWithGeom(ctx, t, params.Geometry, params.Filters, params.Sort,
         func(id int64, propsRaw json.RawMessage, geomRaw json.RawMessage) error {
             var props map[string]any
             if len(propsRaw) > 0 {
@@ -67,15 +136,6 @@ func (s *Service) StreamKMZ(
             _, err = io.WriteString(kw, placemark)
             return err
         })
-    if err != nil {
-        return err
-    }
-
-    if _, err := io.WriteString(kw, kmlFooter()); err != nil {
-        return err
-    }
-
-    return zw.Close()
 }
 
 func kmlHeader(layerName string) string {

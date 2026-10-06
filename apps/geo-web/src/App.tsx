@@ -17,6 +17,7 @@ import { queryClient } from "@/lib/queryClient";
 
 import { ResultsTable } from "@/features/spatial/ResultsTable";
 import { BufferMenu } from "@/features/spatial/BufferMenu";
+import { BundleExportDialog } from "@/features/spatial/BundleExportDialog";
 import { PrintModal } from "@/features/print/PrintModal";
 import { ToastContainer } from "@/features/notifications/ToastContainer";
 import { AdminModal } from "@/features/admin/AdminModal";
@@ -61,6 +62,7 @@ function AuthGate() {
           <FeaturePickerMenu />
           <ResultsTable />
           <BufferMenu />
+          <BundleExportDialog />
           <PrintModal />
         </AppShell>
         <AdminModal />

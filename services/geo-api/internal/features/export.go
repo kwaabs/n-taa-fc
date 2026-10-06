@@ -32,35 +32,101 @@ func (s *Service) StreamXLSX(
     layerName string,
     w io.Writer,
 ) error {
+    f := excelize.NewFile()
+    defer f.Close()
+
+    sheet, err := s.writeXLSXSheet(ctx, f, "Sheet1", layerID, layerName, params)
+    if err != nil {
+        return err
+    }
+    f.SetActiveSheet(sheet)
+
+    return f.Write(w)
+}
+
+// StreamXLSXBundle writes several layers into ONE workbook, one sheet per
+// layer, named after that layer. Layers that fail to resolve/stream are
+// skipped (reported back via the skipped return value) rather than failing
+// the whole bundle.
+func (s *Service) StreamXLSXBundle(
+    ctx context.Context,
+    layers []BundleLayer,
+    within json.RawMessage,
+    w io.Writer,
+) (skipped []string, err error) {
+    f := excelize.NewFile()
+    defer f.Close()
+
+    firstSheetName := "Sheet1"
+    wroteAny := false
+
+    for _, l := range layers {
+        params := ExportCSVParams{Geometry: within}
+        sheetSrc := firstSheetName
+        if wroteAny {
+            sheetSrc = "" // writeXLSXSheet creates a new sheet when src is ""
+        }
+        sheetIdx, werr := s.writeXLSXSheet(ctx, f, sheetSrc, l.ID, l.Name, params)
+        if werr != nil {
+            skipped = append(skipped, l.Name)
+            continue
+        }
+        if !wroteAny {
+            f.SetActiveSheet(sheetIdx)
+        }
+        wroteAny = true
+    }
+
+    if !wroteAny {
+        return skipped, ErrInvalidInput
+    }
+
+    return skipped, f.Write(w)
+}
+
+// writeXLSXSheet streams one layer's rows into a sheet of an existing
+// workbook. If src == "", a new sheet is created (named after layerName);
+// otherwise the sheet at src (typically "Sheet1") is renamed. Returns the
+// resulting sheet's index.
+func (s *Service) writeXLSXSheet(
+    ctx context.Context,
+    f *excelize.File,
+    src string,
+    layerID string,
+    layerName string,
+    params ExportCSVParams,
+) (int, error) {
     if len(params.Geometry) == 0 {
-        return ErrInvalidInput
+        return 0, ErrInvalidInput
     }
 
     layerUUID, err := parseUUID(layerID)
     if err != nil {
-        return err
+        return 0, err
     }
     _, t, err := s.resolve(ctx, layerUUID)
     if err != nil {
-        return err
+        return 0, err
     }
-
-    f := excelize.NewFile()
-    defer f.Close()
 
     sheet := sanitizeSheetName(layerName)
     if sheet == "" {
         sheet = "Data"
     }
-    // excelize creates "Sheet1" by default — rename
-    if err := f.SetSheetName("Sheet1", sheet); err != nil {
-        return err
+
+    if src != "" {
+        if err := f.SetSheetName(src, sheet); err != nil {
+            return 0, err
+        }
+    } else {
+        if _, err := f.NewSheet(sheet); err != nil {
+            return 0, err
+        }
     }
     idx, err := f.GetSheetIndex(sheet)
     if err != nil {
-        return err
+        return 0, err
     }
-    f.SetActiveSheet(idx)
 
     var (
         headerCols []string
@@ -77,7 +143,7 @@ func (s *Service) StreamXLSX(
         },
     })
     if err != nil {
-        return err
+        return 0, err
     }
 
     err = s.repo.StreamByGeometry(ctx, t, params.Geometry, params.Filters, params.Sort,
@@ -120,7 +186,7 @@ func (s *Service) StreamXLSX(
             for i, col := range headerCols {
                 cell, _ := excelize.CoordinatesToCellName(i+1, rowIdx)
                 if col == "ogc_fid" {
-                	f.SetCellInt(sheet, cell, id)
+                    f.SetCellInt(sheet, cell, id)
                     continue
                 }
                 setXLSXValue(f, sheet, cell, props[col])
@@ -129,7 +195,7 @@ func (s *Service) StreamXLSX(
             return nil
         })
     if err != nil {
-        return err
+        return 0, err
     }
 
     // Auto-fit column widths (approximate — excelize doesn't have real autofit)
@@ -138,7 +204,7 @@ func (s *Service) StreamXLSX(
         f.SetColWidth(sheet, colName, colName, 16)
     }
 
-    return f.Write(w)
+    return idx, nil
 }
 
 func setXLSXValue(f *excelize.File, sheet, cell string, v any) {
