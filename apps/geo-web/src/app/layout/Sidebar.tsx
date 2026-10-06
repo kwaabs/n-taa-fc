@@ -5,7 +5,6 @@ import {
   // Settings,    // ← COMMENTED OUT — not in use
   Loader2,
   Lock,
-  Download,
 } from "lucide-react";
 import { useLayoutStore } from "./store/layoutStore";
 import { useLayers } from "@/features/layers/hooks";
@@ -14,7 +13,6 @@ import { LayerSwatch } from "@/features/layers/LayerSwatch";
 import { SearchPanel } from "@/features/search/SearchPanel";
 import { useSearchStore } from "@/features/search/store";
 import { ExportButton } from "@/features/spatial/ExportButton";
-import { useBundleExportStore } from "@/features/spatial/bundleExportStore";
 import { ZoomToLayerButton } from "@/features/layers/ZoomToLayerButton";
 import type { SidebarItem } from "./types";
 
@@ -113,7 +111,6 @@ function LayersSection() {
   const { data, isLoading, isError } = useLayers();
   const visibleIds = useLayersStore((s) => s.visibleIds);
   const toggle = useLayersStore((s) => s.toggle);
-  const openBundleExport = useBundleExportStore((s) => s.openDialog);
 
   if (isLoading) {
     return (
@@ -128,54 +125,44 @@ function LayersSection() {
   }
 
   return (
-    <>
-      <button
-        onClick={openBundleExport}
-        className="mb-2 flex w-full items-center justify-center gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50"
-      >
-        <Download className="h-3.5 w-3.5" />
-        Export multiple layers…
-      </button>
+    <ul className="space-y-0.5">
+      {data.map((layer) => {
+        const on = visibleIds.has(layer.id);
+        return (
+          <li key={layer.id} className="group">
+            <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-slate-50">
+              <input
+                type="checkbox"
+                checked={on}
+                onChange={() => toggle(layer.id)}
+                className="h-4 w-4 accent-emerald-600"
+              />
+              <LayerSwatch layer={layer} />
+              <span className="flex-1 truncate">{layer.display_name}</span>
 
-      <ul className="space-y-0.5">
-        {data.map((layer) => {
-          const on = visibleIds.has(layer.id);
-          return (
-            <li key={layer.id} className="group">
-              <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-slate-50">
-                <input
-                  type="checkbox"
-                  checked={on}
-                  onChange={() => toggle(layer.id)}
-                  className="h-4 w-4 accent-emerald-600"
-                />
-                <LayerSwatch layer={layer} />
-                <span className="flex-1 truncate">{layer.display_name}</span>
-
-                {on && (
-                  <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                    <ZoomToLayerButton layer={layer} />
-                    <ExportButton
-                      endpoint={`/api/v1/layers/${layer.id}/export`}
-                      filenameBase={layer.name}
-                      label=""
-                      requireBounds
-                    />
-                  </div>
-                )}
-
-                {!layer.editable && (
-                  <Lock
-                    className="h-3 w-3 shrink-0 text-slate-400"
-                    aria-label="Read-only layer"
+              {on && (
+                <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                  <ZoomToLayerButton layer={layer} />
+                  <ExportButton
+                    endpoint={`/api/v1/layers/${layer.id}/export`}
+                    filenameBase={layer.name}
+                    label=""
+                    requireBounds
                   />
-                )}
-              </label>
-            </li>
-          );
-        })}
-      </ul>
-    </>
+                </div>
+              )}
+
+              {!layer.editable && (
+                <Lock
+                  className="h-3 w-3 shrink-0 text-slate-400"
+                  aria-label="Read-only layer"
+                />
+              )}
+            </label>
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 
