@@ -8,7 +8,6 @@ import {
   Globe,
   Map as MapIcon,
   Lasso,
-  Lock,
 } from "lucide-react";
 import { useBundleExportStore } from "./bundleExportStore";
 import { useLayers } from "@/features/layers/hooks";
@@ -93,18 +92,22 @@ export function BundleExportDialog() {
   const [format, setFormat] = useState<BundleFormat>("xlsx");
   const [busy, setBusy] = useState(false);
 
+  // Only layers currently turned on are offered — same rule as the
+  // per-layer export button in the sidebar, which also only appears once a
+  // layer is visible.
   const exportableLayers = useMemo(
-    () => (layers ?? []).filter((l) => canExport(l, role)),
-    [layers, role],
+    () =>
+      (layers ?? []).filter(
+        (l) => visibleIds.has(l.id) && canExport(l, role),
+      ),
+    [layers, visibleIds, role],
   );
 
-  // Default the checklist to whatever's currently visible, each time the
+  // Default to everything currently visible+exportable, each time the
   // dialog opens.
   useEffect(() => {
     if (!open) return;
-    setSelected(
-      new Set(exportableLayers.filter((l) => visibleIds.has(l.id)).map((l) => l.id)),
-    );
+    setSelected(new Set(exportableLayers.map((l) => l.id)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -215,40 +218,25 @@ export function BundleExportDialog() {
           </div>
 
           <ul className="mb-4 max-h-56 space-y-0.5 overflow-y-auto rounded-md border border-slate-200 p-1.5">
-            {(layers ?? []).map((layer) => {
-              const exportable = canExport(layer, role);
-              return (
-                <li key={layer.id}>
-                  <label
-                    className={[
-                      "flex items-center gap-2 rounded px-2 py-1.5 text-sm",
-                      exportable
-                        ? "cursor-pointer hover:bg-slate-50"
-                        : "cursor-not-allowed opacity-50",
-                    ].join(" ")}
-                    title={exportable ? undefined : "No export permission"}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selected.has(layer.id)}
-                      disabled={!exportable}
-                      onChange={() => toggle(layer.id)}
-                      className="h-4 w-4 accent-emerald-600"
-                    />
-                    <LayerSwatch layer={layer} />
-                    <span className="flex-1 truncate">
-                      {layer.display_name}
-                    </span>
-                    {!exportable && (
-                      <Lock className="h-3 w-3 shrink-0 text-slate-400" />
-                    )}
-                  </label>
-                </li>
-              );
-            })}
-            {(layers ?? []).length === 0 && (
+            {exportableLayers.map((layer) => (
+              <li key={layer.id}>
+                <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-slate-50">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(layer.id)}
+                    onChange={() => toggle(layer.id)}
+                    className="h-4 w-4 accent-emerald-600"
+                  />
+                  <LayerSwatch layer={layer} />
+                  <span className="flex-1 truncate">
+                    {layer.display_name}
+                  </span>
+                </label>
+              </li>
+            ))}
+            {exportableLayers.length === 0 && (
               <li className="px-2 py-4 text-center text-xs text-slate-400">
-                No layers available.
+                Turn on some layers in the sidebar first.
               </li>
             )}
           </ul>
